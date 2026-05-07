@@ -1,0 +1,74 @@
+clear all;
+clc;
+close all;
+
+fprintf('\n\n --->Computing global sensitivities, this may take a while...\n');
+
+Patient_N023_Inhib_Sens % Calls the script with the inputs: 
+                           % Model
+                           % Experimental scheme 
+                           % Rank problem formulation: unknowns to be
+                           % considered + value of unkwnowns for which the
+                           % analysis is performed
+                           % Numerical approaches for simulation and sensitivity
+                           % analysis
+
+AMIGO_Prep(inputs)         % Calls the task for pre-processing
+
+[results] = AMIGO_GRank(inputs);        % Calls the task for Global Rank
+
+
+% Create figure with good size
+%figure('Position', [100, 100, 1000, 600]);
+
+
+% Get the sensitivity matrix
+sensitivity_matrix = results.rank.g_d_obs_mean_mat{1, 1};
+
+% Get parameter and observable names from the inputs
+parameter_names = inputs.PEsol.id_global_theta;
+observable_names = inputs.exps.obs_names{1};
+
+% Create heatmap
+imagesc(sensitivity_matrix);
+colormap('parula'); % Changed to more presentable colormap
+colorbar;
+
+% Customize appearance
+set(gca, 'XTick', 1:size(sensitivity_matrix, 2));
+set(gca, 'YTick', 1:size(sensitivity_matrix, 1));
+set(gca, 'XTickLabel', parameter_names, 'XTickLabelRotation', 45);
+set(gca, 'YTickLabel', observable_names);
+set(gca, 'FontSize', 14, 'FontWeight', 'bold'); % Increased font size and bold
+
+% Add labels and title
+xlabel('Parameters', 'FontSize', 14, 'FontWeight', 'bold');
+ylabel('Observables', 'FontSize', 14, 'FontWeight', 'bold');
+title('Patient N023 Inhibition rate Sensitivity Analysis Results  ', 'FontSize', 14, 'FontWeight', 'bold');
+
+% Add grid
+grid on;
+set(gca, 'Layer', 'top');
+
+% Adjust colorbar
+c = colorbar;
+c.FontSize = 12;
+c.FontWeight = 'bold';
+ylabel(c, 'Sensitivity', 'FontSize', 14, 'FontWeight', 'bold');
+
+% Add numerical values to cells
+for i = 1:size(sensitivity_matrix, 1)
+    for j = 1:size(sensitivity_matrix, 2)
+        text(j, i, num2str(sensitivity_matrix(i,j), '%.2f'), ...
+            'HorizontalAlignment', 'center', ...
+            'Color', 'black', ... % Changed text color to black
+            'FontWeight', 'bold');
+    end
+end
+
+% Adjust layout
+set(gcf, 'Color', 'white');
+
+% % Save the figure
+% saveas(gcf, 'global_sensitivity_analysis.png');
+% saveas(gcf, 'global_sensitivity_analysis.fig');

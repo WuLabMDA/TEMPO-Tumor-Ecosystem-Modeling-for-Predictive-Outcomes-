@@ -1,0 +1,816 @@
+---
+title: "R Notebook"
+output: html_notebook
+Author: Daniel Marri
+Task: Stacked Area Plot
+---
+
+```{r}
+
+setwd("V:/dkmarri/Breast_Cancer_IMC_Data/R_Codes")
+```
+
+```{r}
+
+library(imcRtools)
+library(cytomapper)
+library(tidyverse)
+library(EBImage)
+library(Seurat)
+#library(SeuratDisk)
+library(ggplot2)
+library(dplyr)
+library(future)
+library(progress)
+library(Matrix)
+library(RANN)
+library(reticulate)
+library(igraph)
+library(tidyr)
+library(dittoSeq)
+library(scater)
+library(patchwork)
+library(cowplot)
+library(viridis)
+library(parallel) 
+library(spdep)
+#library(spatialHeatmap)
+library(igraph)
+library(RANN)
+library(data.table)
+library(Matrix)
+library(parallel)
+library(furrr)
+library(scran)
+#library(batchelor)
+library(BiocParallel)
+library(scater)  # For PCA, if not already installed
+library(SummarizedExperiment)
+#library(sva)
+library(harmony)
+library(RColorBrewer)
+library(BiocSingular)
+library(scales)
+library(ggraph)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+```{r}
+
+Combined_data <- readRDS("saved_data/spe_Combined_Spatial_Graph.rds")
+Combined_data
+```
+
+```{r}
+chemo <- Combined_data[, colData(Combined_data)$Arm == "C"]
+chemo
+```
+
+```{r}
+
+```
+
+#### Stacked Area chat for Chemotherapy Patient 152 (pCR)
+
+```{r}
+# Filter data for Patient I52
+patient_data <- chemo[, colData(chemo)$PatientID == "NT152"]
+```
+
+```{r}
+
+# Get colData
+col_data <- as.data.frame(colData(patient_data))
+
+# Filter for Baseline and Post-treatment only
+timepoint_data <- col_data %>%
+  filter(BiopsyPhase %in% c("Baseline", "Post-treatment"))
+
+# ---- NEW: exclude "Other"/"Othres"/"Others" BEFORE computing percentages ----
+timepoint_data <- timepoint_data %>%
+  filter(!tolower(ParentCelltypes) %in% c("other", "others", "othres"))
+
+# Calculate cell type proportions for each timepoint (re-normalized to 100%)
+cell_props <- timepoint_data %>%
+  group_by(BiopsyPhase, ParentCelltypes) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(BiopsyPhase) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  ungroup()
+
+# Convert BiopsyPhase to numeric with intermediate points for smooth interpolation
+cell_props_expanded <- cell_props %>%
+  mutate(timepoint_num = ifelse(BiopsyPhase == "Baseline", 1, 3)) %>%
+  arrange(ParentCelltypes, timepoint_num)
+
+# Add intermediate interpolation points for smooth area transitions
+cell_props_interpolated <- cell_props_expanded %>%
+  group_by(ParentCelltypes) %>%
+  complete(timepoint_num = seq(1, 3, by = 0.1)) %>%
+  arrange(ParentCelltypes, timepoint_num) %>%
+  mutate(
+    percentage = approx(
+      x = timepoint_num[!is.na(percentage)],
+      y = percentage[!is.na(percentage)],
+      xout = timepoint_num
+    )$y
+  ) %>%
+  ungroup()
+```
+
+```{r}
+# Define cell type colors (remove Other)
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",
+  "Effector T Cells" = "#00FFFF",
+  "Endothelial Cells" = "#4E1251",
+  "Fibroblasts" = "#FF0000",
+  "Macrophages" = "#00FF00",
+  "Regulatory T Cells" = "#FD3DB5"
+)
+```
+
+```{r}
+
+# Create stacked area chart with smooth transitions
+cell_type_colors_use <- cell_type_colors[names(cell_type_colors) %in% unique(cell_props_interpolated$ParentCelltypes)]
+
+
+p1 <- ggplot(
+  cell_props_interpolated,
+  aes(x = timepoint_num, y = percentage, fill = ParentCelltypes, group = ParentCelltypes)
+) +
+  geom_area(position = "stack", alpha = 0.85, color = NA) +
+  scale_x_continuous(
+    breaks = c(1, 3),
+    labels = c("Baseline", "Post-treatment"),
+    limits = c(1, 3),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(values = cell_type_colors_use) +
+  labs(
+    title = "Patient 152",
+    x = "",
+    y = "% of Patient 152 cells ",
+    fill = "Cell Type"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 11, color = "black", face = "bold"),
+    axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+    axis.title.y = element_text(size = 11, face = "bold"),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 13, face = "bold"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  ) +
+  scale_y_continuous(limits = c(0, 100), expand = c(0, 0), breaks = seq(0, 100, 25))
+
+print(p1)
+```
+
+```{r}
+
+
+# Save as high-resolution PNG
+ggsave(
+  filename = "Patient_NT152_CellType_Composition.png",
+  plot = p1,
+  width = 6,        # Width in inches
+  height = 4,        # Height in inches
+  dpi = 1200,         # High resolution (300 DPI for publication quality)
+  bg = "white"       # White background
+)
+```
+
+```{r}
+
+```
+
+#### Stacked Area chat for Chemotherapy Patient 248 (RD)
+
+```{r}
+# Filter data for Patient I52
+patient_data2 <- chemo[, colData(chemo)$PatientID == "NT248"]
+patient_data2
+```
+
+```{r}
+
+
+```
+
+```{r}
+# Get colData
+# Get colData
+col_data2 <- as.data.frame(colData(patient_data2))
+
+# Filter for Baseline and Post-treatment only
+timepoint_data2 <- col_data2 %>%
+  filter(BiopsyPhase %in% c("Baseline", "Post-treatment"))
+
+# ---- NEW: exclude "Other"/"Othres"/"Others" BEFORE computing percentages ----
+timepoint_data2 <- timepoint_data2 %>%
+  filter(!tolower(ParentCelltypes) %in% c("other", "others", "othres"))
+
+# Calculate cell type proportions for each timepoint (re-normalized to 100%)
+cell_props2 <- timepoint_data2 %>%
+  group_by(BiopsyPhase, ParentCelltypes) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(BiopsyPhase) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  ungroup()
+
+# Check the data before plotting
+print("Cell types at each timepoint:")
+print(cell_props2)
+
+# Better approach - ensure clean interpolation
+cell_props_expanded2 <- cell_props2 %>%
+  # Add timepoint numbers
+  mutate(timepoint_num = ifelse(BiopsyPhase == "Baseline", 1, 3)) %>%
+  # Ensure all cell types exist at both timepoints
+  complete(ParentCelltypes, 
+           timepoint_num = c(1, 3),
+           fill = list(count = 0, percentage = 0)) %>%
+  # Fill in the BiopsyPhase for the added rows
+  mutate(BiopsyPhase = ifelse(timepoint_num == 1, "Baseline", "Post-treatment")) %>%
+  arrange(ParentCelltypes, timepoint_num)
+
+# Check expanded data
+print("Expanded data:")
+print(cell_props_expanded2)
+
+
+# Now interpolate with better handling
+cell_props_interpolated2 <- cell_props_expanded2 %>%
+  group_by(ParentCelltypes) %>%
+  # Create all intermediate points
+  reframe(
+    timepoint_num = seq(1, 3, by = 0.1),
+    percentage = approx(
+      x = c(1, 3),
+      y = percentage,
+      xout = seq(1, 3, by = 0.1),
+      method = "linear",
+      rule = 2
+    )$y
+  ) %>%
+  ungroup() %>%
+  # *** NEW: Re-normalize to ensure sum = 100 at each timepoint ***
+  group_by(timepoint_num) %>%
+  mutate(percentage = (percentage / sum(percentage)) * 100) %>%
+  ungroup()
+
+# Check for any NA values
+print("Any NAs in interpolated data:")
+print(sum(is.na(cell_props_interpolated2$percentage)))
+print("Sum at each timepoint (should all be 100):")
+print(cell_props_interpolated2 %>% group_by(timepoint_num) %>% summarise(total = sum(percentage)))
+```
+
+```{r}
+# Define cell type colors (remove Other)
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",
+  "Effector T Cells" = "#00FFFF",
+  "Endothelial Cells" = "#4E1251",
+  "Fibroblasts" = "#FF0000",
+  "Macrophages" = "#00FF00",
+  "Regulatory T Cells" = "#FD3DB5"
+)
+```
+
+```{r}
+
+# Create stacked area chart with smooth transitions
+cell_type_colors_use <- cell_type_colors[names(cell_type_colors) %in% unique(cell_props_interpolated2$ParentCelltypes)]
+
+
+p2 <- ggplot(
+  cell_props_interpolated2,
+  aes(x = timepoint_num, y = percentage, fill = ParentCelltypes, group = ParentCelltypes)
+) +
+  geom_area(position = "stack", alpha = 0.85, color = NA) +
+  scale_x_continuous(
+    breaks = c(1, 3),
+    labels = c("Baseline", "Post-treatment"),
+    limits = c(1, 3),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(values = cell_type_colors_use) +
+  labs(
+    title = "Patient 248",
+    x = "",
+    y = "% of Patient 248 cells ",
+    fill = "Cell Type"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 11, color = "black", face = "bold"),
+    axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+    axis.title.y = element_text(size = 11, face = "bold"),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 13, face = "bold"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  ) +
+  scale_y_continuous(limits = c(0, 100), expand = c(0, 0), breaks = seq(0, 100, 25))
+
+print(p2)
+```
+
+```{r}
+
+
+# Save as high-resolution PNG
+ggsave(
+  filename = "Patient_NT248_CellType_Composition.png",
+  plot = p2,
+  width = 6,        # Width in inches
+  height = 4,        # Height in inches
+  dpi = 1200,         # High resolution (300 DPI for publication quality)
+  bg = "white"       # White background
+)
+```
+
+```{r}
+
+```
+
+#### Chemo&Immuno
+
+```{r}
+chemo_imm <- Combined_data[, colData(Combined_data)$Arm == "C&I"]
+chemo_imm
+```
+
+```{r}
+
+```
+
+#### Chemoimmune Patient 115 (pCr)
+
+```{r}
+# Filter data for Patient I15
+patient_data3 <- chemo_imm[, colData(chemo_imm)$PatientID == "NT115"]
+patient_data3
+```
+
+```{r}
+
+# Get colData
+col_data3 <- as.data.frame(colData(patient_data3))
+
+# Filter for Baseline and Post-treatment only
+timepoint_data3 <- col_data3 %>%
+  filter(BiopsyPhase %in% c("Baseline", "Post-treatment"))
+
+# Exclude "Other"/"Othres"/"Others" BEFORE computing percentages
+timepoint_data3 <- timepoint_data3 %>%
+  filter(!tolower(ParentCelltypes) %in% c("other", "others", "othres"))
+
+# Calculate cell type proportions for each timepoint (re-normalized to 100%)
+cell_props3 <- timepoint_data3 %>%
+  group_by(BiopsyPhase, ParentCelltypes) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(BiopsyPhase) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  ungroup()
+
+# Ensure clean interpolation
+cell_props_expanded3 <- cell_props3 %>%
+  mutate(timepoint_num = ifelse(BiopsyPhase == "Baseline", 1, 3)) %>%
+  complete(ParentCelltypes, 
+           timepoint_num = c(1, 3),
+           fill = list(count = 0, percentage = 0)) %>%
+  mutate(BiopsyPhase = ifelse(timepoint_num == 1, "Baseline", "Post-treatment")) %>%
+  arrange(ParentCelltypes, timepoint_num)
+
+# Interpolate
+cell_props_interpolated3 <- cell_props_expanded3 %>%
+  group_by(ParentCelltypes) %>%
+  reframe(
+    timepoint_num = seq(1, 3, by = 0.1),
+    percentage = approx(
+      x = c(1, 3),
+      y = percentage,
+      xout = seq(1, 3, by = 0.1),
+      method = "linear",
+      rule = 2
+    )$y
+  ) %>%
+  ungroup() %>%
+  mutate(percentage = ifelse(is.na(percentage) | is.nan(percentage), 0, percentage)) %>%
+  group_by(timepoint_num) %>%
+  mutate(percentage = (percentage / sum(percentage)) * 100) %>%
+  ungroup() %>%
+  mutate(percentage = ifelse(is.na(percentage) | is.nan(percentage), 0, percentage))
+
+# NEW APPROACH: Manually calculate ymin and ymax for each cell type
+# Define stacking order (bottom to top)
+stack_order <- c("Macrophages", "Fibroblasts", "Regulatory T Cells", 
+                 "Endothelial Cells", "Effector T Cells", "Cancer Cells")
+
+cell_props_interpolated3 <- cell_props_interpolated3 %>%
+  mutate(ParentCelltypes = factor(ParentCelltypes, levels = stack_order)) %>%
+  arrange(timepoint_num, ParentCelltypes) %>%
+  group_by(timepoint_num) %>%
+  mutate(
+    ymax = cumsum(percentage),
+    ymin = ymax - percentage
+  ) %>%
+  ungroup()
+```
+
+```{r}
+# Define cell type colors
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",      # Blue color 
+  "Effector T Cells" = "#00FFFF",  # Cyan color
+  "Endothelial Cells" = "#4E1251", # Purple color
+  "Fibroblasts" = "#FF0000",       # Red color
+  "Macrophages" = "#00FF00",       # Green color
+  "Regulatory T Cells" = "#FD3DB5" # Magenta color
+)
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Plot using geom_ribbon instead of geom_area
+p3 <- ggplot(cell_props_interpolated3, aes(x = timepoint_num, fill = ParentCelltypes)) +
+  geom_ribbon(aes(ymin = ymin, ymax = ymax, group = ParentCelltypes), alpha = 0.85) +
+  scale_x_continuous(
+    breaks = c(1, 3),
+    labels = c("Baseline", "Post-treatment"),
+    limits = c(1, 3),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(values = cell_type_colors, drop = FALSE) +
+  labs(
+    title = "Patient 115",
+    x = "",
+    y = "% of Patient 115 cells",
+    fill = "Cell Type"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 11, color = "black", face = "bold"),
+    axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+    axis.title.y = element_text(size = 11, face = "bold"),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 13, face = "bold"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  ) +
+  scale_y_continuous(limits = c(0, 100), expand = c(0, 0), breaks = seq(0, 100, 25))
+
+print(p3)
+```
+
+```{r}
+
+
+# Save as high-resolution PNG
+ggsave(
+  filename = "Patient_NT115_CellType_Composition.png",
+  plot = p3,
+  width = 6,        # Width in inches
+  height = 4,        # Height in inches
+  dpi = 1200,         # High resolution (300 DPI for publication quality)
+  bg = "white"       # White background
+)
+```
+
+```{r}
+
+```
+
+#### Chemoimmune Patient 017 (RD)
+
+```{r}
+# Filter data for Patient I52
+patient_data4 <- chemo_imm[, colData(chemo_imm)$PatientID == "NT017"]
+patient_data4
+```
+
+```{r}
+
+
+
+# Get colData
+col_data4 <- as.data.frame(colData(patient_data4))
+
+# Filter for Baseline and Post-treatment only
+timepoint_data4 <- col_data4 %>%
+  filter(BiopsyPhase %in% c("Baseline", "Post-treatment"))
+
+# Exclude "Other"/"Othres"/"Others" BEFORE computing percentages
+timepoint_data4 <- timepoint_data4 %>%
+  filter(!tolower(ParentCelltypes) %in% c("other", "others", "othres"))
+
+# Calculate cell type proportions for each timepoint (re-normalized to 100%)
+cell_props4 <- timepoint_data4 %>%
+  group_by(BiopsyPhase, ParentCelltypes) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(BiopsyPhase) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  ungroup()
+
+# Ensure clean interpolation
+cell_props_expanded4 <- cell_props4 %>%
+  mutate(timepoint_num = ifelse(BiopsyPhase == "Baseline", 1, 3)) %>%
+  complete(ParentCelltypes, 
+           timepoint_num = c(1, 3),
+           fill = list(count = 0, percentage = 0)) %>%
+  mutate(BiopsyPhase = ifelse(timepoint_num == 1, "Baseline", "Post-treatment")) %>%
+  arrange(ParentCelltypes, timepoint_num)
+
+# Interpolate
+cell_props_interpolated4 <- cell_props_expanded4 %>%
+  group_by(ParentCelltypes) %>%
+  reframe(
+    timepoint_num = seq(1, 3, by = 0.1),
+    percentage = approx(
+      x = c(1, 3),
+      y = percentage,
+      xout = seq(1, 3, by = 0.1),
+      method = "linear",
+      rule = 2
+    )$y
+  ) %>%
+  ungroup() %>%
+  mutate(percentage = ifelse(is.na(percentage) | is.nan(percentage), 0, percentage)) %>%
+  group_by(timepoint_num) %>%
+  mutate(percentage = (percentage / sum(percentage)) * 100) %>%
+  ungroup() %>%
+  mutate(percentage = ifelse(is.na(percentage) | is.nan(percentage), 0, percentage))
+
+# NEW APPROACH: Manually calculate ymin and ymax for each cell type
+# Define stacking order (bottom to top)
+stack_order <- c("Macrophages", "Fibroblasts", "Regulatory T Cells", 
+                 "Endothelial Cells", "Effector T Cells", "Cancer Cells")
+
+cell_props_interpolated4 <- cell_props_interpolated4 %>%
+  mutate(ParentCelltypes = factor(ParentCelltypes, levels = stack_order)) %>%
+  arrange(timepoint_num, ParentCelltypes) %>%
+  group_by(timepoint_num) %>%
+  mutate(
+    ymax = cumsum(percentage),
+    ymin = ymax - percentage
+  ) %>%
+  ungroup()
+```
+
+```{r}
+# Define cell type colors
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",      # Blue color 
+  "Effector T Cells" = "#00FFFF",  # Cyan color
+  "Endothelial Cells" = "#4E1251", # Purple color
+  "Fibroblasts" = "#FF0000",       # Red color
+  "Macrophages" = "#00FF00",       # Green colo           
+  "Regulatory T Cells" = "#FD3DB5" # Magenta color
+)
+```
+
+```{r}
+
+# Plot using geom_ribbon instead of geom_area
+p4 <- ggplot(cell_props_interpolated4, aes(x = timepoint_num, fill = ParentCelltypes)) +
+  geom_ribbon(aes(ymin = ymin, ymax = ymax, group = ParentCelltypes), alpha = 0.85) +
+  scale_x_continuous(
+    breaks = c(1, 3),
+    labels = c("Baseline", "Post-treatment"),
+    limits = c(1, 3),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(values = cell_type_colors, drop = FALSE) +
+  labs(
+    title = "Patient 017",
+    x = "",
+    y = "% of Patient 017 cells",
+    fill = "Cell Type"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 11, color = "black", face = "bold"),
+    axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+    axis.title.y = element_text(size = 11, face = "bold"),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 13, face = "bold"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  ) +
+  scale_y_continuous(limits = c(0, 100), expand = c(0, 0), breaks = seq(0, 100, 25))
+
+print(p4)
+```
+
+```{r}
+
+
+
+# Filter data for Patient 017
+patient_data4 <- chemo_imm[, colData(chemo_imm)$PatientID == "NT017"]
+
+# Get colData
+col_data4 <- as.data.frame(colData(patient_data4))
+
+# Filter for Baseline and Post-treatment only
+timepoint_data4 <- col_data4 %>%
+  filter(BiopsyPhase %in% c("Baseline", "Post-treatment"))
+
+# Exclude "Other"/"Othres"/"Others" BEFORE computing percentages
+timepoint_data4 <- timepoint_data4 %>%
+  filter(!tolower(ParentCelltypes) %in% c("other", "others", "othres"))
+
+# Calculate cell type proportions for each timepoint
+cell_props4 <- timepoint_data4 %>%
+  group_by(BiopsyPhase, ParentCelltypes) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(BiopsyPhase) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  ungroup()
+
+# Ensure clean interpolation - make sure ALL cell types exist at BOTH timepoints
+all_cell_types <- unique(cell_props4$ParentCelltypes)
+all_timepoints <- c("Baseline", "Post-treatment")
+
+cell_props_complete <- expand.grid(
+  ParentCelltypes = all_cell_types,
+  BiopsyPhase = all_timepoints,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(cell_props4, by = c("ParentCelltypes", "BiopsyPhase")) %>%
+  mutate(
+    count = ifelse(is.na(count), 0, count),
+    percentage = ifelse(is.na(percentage), 0, percentage)
+  ) %>%
+  # Re-normalize within each timepoint
+  group_by(BiopsyPhase) %>%
+  mutate(percentage = (percentage / sum(percentage)) * 100) %>%
+  ungroup() %>%
+  # Handle any NaN from 0/0
+  mutate(percentage = ifelse(is.nan(percentage), 0, percentage))
+
+# Add timepoint numbers
+cell_props_expanded4 <- cell_props_complete %>%
+  mutate(timepoint_num = ifelse(BiopsyPhase == "Baseline", 1, 3)) %>%
+  arrange(ParentCelltypes, timepoint_num)
+
+# Interpolate with enhanced error handling
+cell_props_interpolated4 <- cell_props_expanded4 %>%
+  group_by(ParentCelltypes) %>%
+  reframe(
+    timepoint_num = seq(1, 3, by = 0.1),
+    percentage = approx(
+      x = c(1, 3),
+      y = percentage,
+      xout = seq(1, 3, by = 0.1),
+      method = "linear",
+      rule = 2,
+      ties = mean
+    )$y
+  ) %>%
+  ungroup() %>%
+  # Clean up any NA/NaN
+  mutate(percentage = ifelse(is.na(percentage) | is.nan(percentage), 0, percentage)) %>%
+  # Re-normalize at each timepoint
+  group_by(timepoint_num) %>%
+  mutate(percentage = (percentage / sum(percentage)) * 100) %>%
+  ungroup() %>%
+  # Final cleanup
+  mutate(percentage = ifelse(is.na(percentage) | is.nan(percentage) | is.infinite(percentage), 0, percentage))
+
+# Define stacking order (bottom to top)
+stack_order <- c("Macrophages", "Fibroblasts", "Regulatory T Cells", 
+                 "Endothelial Cells", "Effector T Cells", "Cancer Cells")
+
+# Calculate ymin and ymax with safety checks
+cell_props_interpolated4 <- cell_props_interpolated4 %>%
+  mutate(ParentCelltypes = factor(ParentCelltypes, levels = stack_order)) %>%
+  arrange(timepoint_num, ParentCelltypes) %>%
+  group_by(timepoint_num) %>%
+  mutate(
+    ymax = cumsum(percentage),
+    ymin = ymax - percentage,
+    # Cap ymax at 100
+    ymax = pmin(ymax, 100),
+    # Ensure ymin is not negative
+    ymin = pmax(ymin, 0)
+  ) %>%
+  ungroup() %>%
+  # Remove any rows with invalid values
+  filter(!is.na(ymin) & !is.na(ymax) & !is.infinite(ymin) & !is.infinite(ymax))
+
+# Define cell type colors
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",
+  "Effector T Cells" = "#00FFFF",
+  "Endothelial Cells" = "#4E1251",
+  "Fibroblasts" = "#FF0000",
+  "Macrophages" = "#00FF00",
+  "Regulatory T Cells" = "#FD3DB5"
+)
+
+# Plot
+p4 <- ggplot(cell_props_interpolated4, aes(x = timepoint_num, fill = ParentCelltypes)) +
+  geom_ribbon(aes(ymin = ymin, ymax = ymax, group = ParentCelltypes), alpha = 0.85) +
+  scale_x_continuous(
+    breaks = c(1, 3),
+    labels = c("Baseline", "Post-treatment"),
+    limits = c(1, 3),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(values = cell_type_colors, drop = FALSE) +
+  labs(
+    title = "Patient 017",
+    x = "",
+    y = "% of Patient 017 cells",
+    fill = "Cell Type"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 11, color = "black", face = "bold"),
+    axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+    axis.title.y = element_text(size = 11, face = "bold"),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 13, face = "bold"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  ) +
+  scale_y_continuous(limits = c(0, 100), expand = c(0, 0), breaks = seq(0, 100, 25))
+
+print(p4)
+```
+
+```         
+```
+
+```{r}
+
+
+# Save as high-resolution PNG
+ggsave(
+  filename = "Patient_NT017_CellType_Composition.png",
+  plot = p4,
+  width = 6,        # Width in inches
+  height = 4,        # Height in inches
+  dpi = 1200,         # High resolution (300 DPI for publication quality)
+  bg = "white"       # White background
+)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

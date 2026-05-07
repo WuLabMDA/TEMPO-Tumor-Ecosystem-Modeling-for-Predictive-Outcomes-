@@ -1,0 +1,1751 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+
+setwd('V:/dkmarri/Breast_Cancer_IMC_Data/R_Codes')
+```
+
+```{r}
+library(imcRtools)
+library(cytomapper)
+library(tidyverse)
+library(EBImage)
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(dplyr)
+library(future)
+library(progress)
+library(Matrix)
+library(RANN)
+library(reticulate)
+library(igraph)
+library(tidyr)
+library(dittoSeq)
+library(scater)
+library(patchwork)
+library(cowplot)
+library(viridis)
+library(parallel) 
+library(spdep)
+library(spatialHeatmap)
+library(igraph)
+library(RANN)
+library(data.table)
+library(Matrix)
+library(parallel)
+library(furrr)
+library(scran)
+library(batchelor)
+library(BiocParallel)
+library(scater)  # For PCA, if not already installed
+library(SummarizedExperiment)
+library(sva)
+library(harmony)
+library(RColorBrewer)
+library(BiocSingular)
+library(scales)
+library(ggraph)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+#### Import the two arms dataset
+
+```{r}
+#Import chemotherapy dataset
+
+spe_chemo <- readRDS("saved_data/spe_chemo_Spatial_Graph.rds")
+spe_chemo
+
+```
+
+```{r}
+#Imort the chemo_and_immuno dataset
+
+spe_chemo_immu <- readRDS("saved_data/spe_chemo_immu_Spatial_Graph.rds")
+spe_chemo_immu
+```
+
+```{r}
+
+sce <-readRDS("saved_data/15_10_2024_spe_seurat.Rds")
+sce
+
+```
+
+#### Plot the mean expression in each Arm of treatment
+
+```{r}
+
+features <- rownames(spe_chemo)
+features1 <- c('CD4','Ki67','CD31','TCF1',"Helios","CD8", "OX40", "CD11c",         "CD3",'CA9' )
+
+
+
+```
+
+```{r}
+
+RidgePlot(sce, features = features1, ncol = 2)
+```
+
+```{r}
+
+# Function to apply the transformation
+transform_expression <- function(x) {
+  abs(log2(x + 1e-4) - log2(11e-5))
+}
+```
+
+```{r}
+# Assuming transform_expression is your custom normalization function
+normalized_data <- transform_expression(GetAssayData(sce, assay = "originalexp", slot = "counts"))
+
+# Convert normalized_data to dgCMatrix if necessary
+if (!inherits(normalized_data, "matrix")) {
+  library(Matrix)
+  normalized_data <- as(normalized_data, "dgCMatrix")
+}
+
+# Set the normalized data back into the Seurat object using the layer argument
+sce <- SetAssayData(sce, layer = "data", new.data = normalized_data, assay = "originalexp")
+
+sce
+```
+
+```{r}
+RidgePlot(sce, features = features1, ncol = 2)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```         
+```
+
+```{r}
+
+library(tidyverse)
+library(kableExtra)
+```
+
+```{r}
+daughter_to_parent <- c(
+  "Fibroblasts" = "Fibroblasts",
+  "DCs" = "Other",
+  "CA9^+" = "Cancer Cells",
+  "PDPN^+Stromal" = "Fibroblasts",
+  "M2 Mac" = "Macrophages",
+  "Myofibroblasts" = "Fibroblasts",
+  "CD79a^+Plasma" = "Other",
+  "CK8/18^{med}" = "Cancer Cells",
+  "CD56^+NK" = "Other",
+  "CD4^+TCF1^+T" = "Effector T Cells",
+  "panCK^{med}" = "Cancer Cells",
+  "Treg" = "Regulatory T Cells",
+  "CD8^+T" = "Effector T Cells",
+  "CD8^+TCF1^+T" = "Effector T Cells",
+  "CD8^+PD1^+T_{Ex}" = "Effector T Cells",
+  "Endothelial" = "Endothelial Cells",
+  "CD4^+PD1^+T" = "Effector T Cells",
+  "CD8^+GZMB^+T" = "Effector T Cells",
+  "PD-L1^+APCs" = "Macrophages",
+  "CD15^{+}" = "Other",
+  "PD-L1^{+}GZMB^{+}" = "Other",
+  "pH2AX^{+}DSB" = "Other",
+  "Vimentin^{+}EMT" = "Cancer Cells",
+  "CK^{hi}GATA3^{+}" = "Cancer Cells",
+  "CK^{lo}GATA3^{+}" = "Cancer Cells",
+  "Helios^{+}" = "Regulatory T Cells",
+  "Basal" = "Cancer Cells",
+  "Apoptosis" = "Other",
+  "Neutrophils" = "Other",
+  "CD20^+B" = "Other",
+  "PD-L1^{+}IDO^{+}" = "Other",
+  "PD-L1^+IDO^+APCs" = "Macrophages",
+  "AR^{+}LAR" = "Cancer Cells",
+  "TCF1^{+}" = "Effector T Cells",
+  "MHC I&II^{hi}" = "Other",
+  "CD56^{+}NE" = "Other",
+  "CA9^{+}Hypoxia" = "Cancer Cells"
+)
+```
+
+```{r}
+
+df <- data.frame(
+  Daughter = names(daughter_to_parent),   # Named elements (daughter)
+  Parent = unname(daughter_to_parent)     # Unnamed elements (parent)
+)
+
+```
+
+```{r}
+
+# Group by 'Parent' and collapse 'Daughter' entries
+New_df_grouped <- df %>%
+  group_by(Parent) %>%
+  summarise(Daughters = paste(Daughter, collapse = ", ")) %>%
+  arrange(Parent)   # Arrange alphabetically by Parent
+
+# Print the table
+print(New_df_grouped)
+```
+
+```{r}
+
+parent_lookup <- setNames(New_df_grouped$Parent, New_df_grouped$Daughters)
+
+# Function to match labels to parents
+match_to_parent <- function(label) {
+  for (daughters in names(parent_lookup)) {
+    if (label %in% unlist(strsplit(daughters, ", "))) {
+      return(parent_lookup[daughters])
+    }
+  }
+  return(NA)  # Return NA if no match found
+}
+
+# Create a new data frame with cell names and matched parent cells
+new_metadata <- data.frame(
+  cell = colnames(sce),
+  ParentCell = sapply(sce$Label, match_to_parent)
+)
+
+# Add the new metadata to the Seurat object
+sce <- AddMetaData(sce, metadata = new_metadata$ParentCell, col.name = "ParentCell")
+
+# Check the results
+table(sce$ParentCell, useNA = "ifany")
+
+```
+
+```{r}
+# feature in each cluster. The color represents the average expression level
+DotPlot(sce, features = features,cols = c("blue", "red"), dot.scale = 8, group.by = 'ParentCell') + RotatedAxis()
+```
+
+```{r}
+# Replace 'celltype'/ with the actual column name containing cell type information
+Idents(sce) <- sce$ParentCell
+
+# Check again
+print(table(Idents(sce)))
+```
+
+#### Find all the highest expressed biomarkers in each cell type
+
+```{r}
+
+#  Find markers for each cell type
+all_markers <- FindAllMarkers(sce, 
+                              only.pos = TRUE, 
+                              min.pct = 0.60, 
+                              logfc.threshold = 0.25)
+```
+
+```{r}
+
+top_markers <- all_markers %>%
+  group_by(cluster) %>%
+  top_n(n = 10, wt = avg_log2FC) %>%
+  ungroup()
+```
+
+```{r}
+
+# Create the DotPlot
+dot_plot <- DotPlot(sce, 
+                    features = unique(all_markers$gene), 
+                    cols = c("lightgrey", "blue"),
+                    dot.scale = 7) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Top Protein Biomarkers Across Cell Types")
+
+# Display the plot
+print(dot_plot)
+```
+
+```{r}
+
+avg_expression <- AggregateExpression(sce, 
+                                      features = unique(all_markers$gene),
+                                      group.by = "ParentCell",
+                                      slot = "data",
+                                      assays = "originalexp")
+
+# Get genes with average expression > 1
+high_expr_genes <- rownames(avg_expression$originalexp)[rowMeans(avg_expression$originalexp) > 1]
+
+```
+
+```{r}
+
+dot_plot <- DotPlot(sce, 
+                    features = high_expr_genes, 
+                    group.by = 'ParentCell',
+                    cols = c("lightgrey", "blue"),
+                    dot.scale = 7) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Top Protein Biomarkers Across Cell Types")
+
+# Display the plot
+print(dot_plot)
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Group by cell types and extract the proteins for each cell type
+
+Significant_Markers <- top_markers %>%
+  group_by(cluster) %>%
+  summarize(proteins = paste(unique(gene), collapse = ", "))
+
+Significant_Markers <-  as.data.frame(Significant_Markers)
+
+Significant_Markers
+
+
+```
+
+```{r}
+# Save the sce data into a seurat object
+
+SaveSeuratRds(sce, "saved_data/15_10_2024_spe_seurat.Rds")
+
+```
+
+#### Transform both the chemotherapy and the immuno+chemotherapy dataset using the arcsinh transformation.
+
+```{r}
+# Function to apply the transformation
+transform_expression <- function(x) {
+  abs(log2(x + 1e-4) - log2(11e-5))
+}
+```
+
+```{r}
+
+# transform the chemotherpy dataset
+# Get the counts data
+counts_data <- assay(spe_chemo, "counts")
+
+# Apply the transformation function
+transformed_data <- apply(counts_data, c(1,2), transform_expression)
+
+# Add the transformed data as a new assay
+assay(spe_chemo, "transformed_counts") <- transformed_data
+```
+
+```{r}
+
+spe_chemo
+```
+
+```{r}
+# transform the chemotherpy+immunotherapy  dataset
+# Get the counts data
+
+counts_data1 <- assay(spe_chemo_immu, "counts")
+
+# Apply the transformation function
+transformed_data <- apply(counts_data1, c(1,2), transform_expression)
+
+# Add the transformed data as a new assay
+assay(spe_chemo_immu, "transformed_counts") <- transformed_data
+```
+
+```{r}
+
+spe_chemo_immu
+```
+
+```{r}
+
+parent_lookup <- setNames(New_df_grouped$Parent, New_df_grouped$Daughters)
+
+# Function to match labels to parents
+match_to_parent <- function(label) {
+  for (daughters in names(parent_lookup)) {
+    if (label %in% unlist(strsplit(daughters, ", "))) {
+      return(parent_lookup[daughters])
+    }
+  }
+  return(NA)  # Return NA if no match found
+}
+
+# Create a new data frame with cell names and matched parent cells
+new_metadata <- data.frame(
+  cell = colnames(spe_chemo),
+  ParentCell = sapply(spe_chemo$Label, match_to_parent)
+)
+
+
+# Add the new metadata to the Seurat object
+colData(spe_chemo)$ParentCell <- new_metadata$ParentCell
+
+unique(spe_chemo$ParentCell)
+
+```
+
+```{r}
+
+# Create a new data frame with cell names and matched parent cells for Chemo_immu
+new_immu_metadata <- data.frame(
+  cell = colnames(spe_chemo_immu),
+  ParentCell = sapply(spe_chemo_immu$Label, match_to_parent)
+)
+
+
+# Add the new metadata to the Seurat object
+colData(spe_chemo_immu)$ParentCell <- new_immu_metadata$ParentCell
+
+unique(spe_chemo_immu$ParentCell)
+```
+
+```{r}
+
+```
+
+#### Get the protein biomarkers highly expressed in each arm of treatment
+
+##### For chemotherapy
+
+```{r}
+
+
+
+
+
+## aggregate by cell type
+celltype_mean <- aggregateAcrossCells(as(spe_chemo, "SingleCellExperiment"),  
+                     ids = spe_chemo$ParentCell, 
+                     statistics = "mean",
+                     use.assay.type = "exprs", 
+                     subset.row = features)
+
+
+
+# Step 3: Ensure cell type metadata is correctly assigned
+# Use unique 'spe$Label' values for cell type annotations
+colData(celltype_mean)$celltype <- factor(unique(spe_chemo$ParentCell))
+
+# Step 4: Count the number of cells per aggregated cell type
+colData(celltype_mean)$ncells <- as.numeric(table(spe_chemo$ParentCell)[unique(spe_chemo$ParentCell)])
+
+# Step 5: Plot the heatmap using dittoHeatmap
+dittoHeatmap(celltype_mean,
+             assay = "exprs", 
+             cluster_cols = TRUE, 
+             scale = "row",                   # Scale by row (gene-wise)
+             heatmap.colors = colorRampPalette(c("blue", "white", "red"))(100),    # Use viridis color scale
+             annot.by = c("celltype", "ncells"),
+             fontsize_row = 7,                 # Adjust the font size for type markers
+                            # Show all color breaks for cell types
+             show_legend = TRUE,
+             legend.position = "right", 
+             main = "Heatmap for celltypes and their expressed biomarkers for spe_chemotherapy")  # Annotate by 'celltype' and 'ncells'
+```
+
+```{r}
+
+# Extract expression data
+expression_data <- assay(celltype_mean, "exprs")
+```
+
+```{r}
+
+# Function to identify highly expressed proteins
+identify_high_expression <- function(expression_vector, threshold = 0.90) {
+  quantile_threshold <- quantile(expression_vector, probs = threshold)
+  return(expression_vector > quantile_threshold)
+}
+
+
+# Apply the function to each row (protein)
+high_expression_matrix <- t(apply(expression_data, 1, identify_high_expression))
+
+```
+
+```{r}
+
+# Convert to a data frame
+high_expression_df <- as.data.frame(high_expression_matrix)
+
+# Add protein names as a column
+high_expression_df$Protein <- rownames(high_expression_df)
+```
+
+```{r}
+
+# Reshape the data frame
+spe_chemotherapy_result_df <- high_expression_df %>%
+  pivot_longer(cols = -Protein, names_to = "CellType", values_to = "IsHighlyExpressed") %>%
+  filter(IsHighlyExpressed) %>%
+  select(-IsHighlyExpressed)
+
+
+# Sort the dataframe
+spe_chemotherapy_result_df <- spe_chemotherapy_result_df %>%
+  arrange(Protein, CellType)
+
+```
+
+```{r}
+
+spe_chemotherapy_celltype_summary <- spe_chemotherapy_result_df %>%
+  group_by(CellType) %>%
+  summarise(NumProteins = n_distinct(Protein)) %>%
+  arrange(desc(NumProteins))
+spe_chemotherapy_celltype_summary
+```
+
+```{r}
+
+# Create a new dataframe with cell types and their highly expressed proteins
+spe_chemotherapy_celltype_proteins_df <- spe_chemotherapy_result_df %>%
+  group_by(CellType) %>%
+  summarise(HighlyExpressedProteins = paste(Protein, collapse = ", ")) %>%
+  arrange(CellType)
+
+spe_chemotherapy_celltype_proteins_df
+```
+
+```{r}
+plot_data <- high_expression_matrix %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Protein") %>%
+  pivot_longer(cols = -Protein, names_to = "CellType", values_to = "Expressed") %>%
+  filter(Expressed == TRUE)
+
+# Create the dotplot
+dotplot <- ggplot(plot_data, aes(x = CellType, y = Protein)) +
+  geom_point(size = 3, color = "blue") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 8)
+  ) +
+  labs(
+    title = "Highly Expressed Proteins Across Cell Types",
+    x = "Cell Type",
+    y = "Protein"
+  )
+
+# Display the plot
+print(dotplot)
+```
+
+```{r}
+
+```
+
+#### For Chemo_Immu therapy
+
+```{r}
+
+## aggregate by cell type
+celltype_mean1 <- aggregateAcrossCells(as(spe_chemo_immu, "SingleCellExperiment"),  
+                     ids = spe_chemo_immu$ParentCell, 
+                     statistics = "mean",
+                     use.assay.type = "exprs", 
+                     subset.row = features)
+
+
+
+# Step 3: Ensure cell type metadata is correctly assigned
+# Use unique 'spe$Label' values for cell type annotations
+colData(celltype_mean1)$celltype <- factor(unique(spe_chemo_immu$ParentCell))
+
+# Step 4: Count the number of cells per aggregated cell type
+colData(celltype_mean1)$ncells <- as.numeric(table(spe_chemo_immu$ParentCell)[unique(spe_chemo_immu$ParentCell)])
+
+# Step 5: Plot the heatmap using dittoHeatmap
+dittoHeatmap(celltype_mean1,
+             assay = "exprs", 
+             cluster_cols = TRUE, 
+             scale = "row",                   # Scale by row (gene-wise)
+             heatmap.colors = colorRampPalette(c("blue", "white", "red"))(100),    # Use viridis color scale
+             annot.by = c("celltype", "ncells"),
+             fontsize_row = 7,                 # Adjust the font size for type markers
+                            # Show all color breaks for cell types
+             show_legend = TRUE,
+             legend.position = "right", 
+             main = "Heatmap for celltypes and their expressed biomarkers for spe_chemo_Immu")  # Annotate by 'celltype' and 'ncells'
+```
+
+```{r}
+
+# Extract expression data
+expression_data1 <- assay(celltype_mean1, "exprs")
+```
+
+```{r}
+
+# Function to identify highly expressed proteins
+identify_high_expression1 <- function(expression_vector, threshold = 0.90) {
+  quantile_threshold <- quantile(expression_vector, probs = threshold)
+  return(expression_vector > quantile_threshold)
+}
+
+
+# Apply the function to each row (protein)
+high_expression_matrix1 <- t(apply(expression_data1, 1, identify_high_expression1))
+
+```
+
+```{r}
+
+# Convert to a data frame
+high_expression_df1 <- as.data.frame(high_expression_matrix1)
+
+# Add protein names as a column
+high_expression_df1$Protein <- rownames(high_expression_df1)
+```
+
+```{r}
+
+# Reshape the data frame
+spe_chemo_immu_result_df <- high_expression_df1 %>%
+  pivot_longer(cols = -Protein, names_to = "CellType", values_to = "IsHighlyExpressed") %>%
+  filter(IsHighlyExpressed) %>%
+  select(-IsHighlyExpressed)
+
+
+# Sort the dataframe
+spe_chemo_immu_result_df <- spe_chemo_immu_result_df %>%
+  arrange(Protein, CellType)
+
+```
+
+```{r}
+
+spe_chemo_immu_celltype_summary <- spe_chemo_immu_result_df %>%
+  group_by(CellType) %>%
+  summarise(NumProteins = n_distinct(Protein)) %>%
+  arrange(desc(NumProteins))
+spe_chemo_immu_celltype_summary
+```
+
+```{r}
+
+# Create a new dataframe with cell types and their highly expressed proteins
+spe_chemo_immu_celltype_proteins_df <- spe_chemo_immu_result_df %>%
+  group_by(CellType) %>%
+  summarise(HighlyExpressedProteins = paste(Protein, collapse = ", ")) %>%
+  arrange(CellType)
+
+spe_chemo_immu_celltype_proteins_df
+```
+
+```{r}
+
+plot_data <- high_expression_matrix1 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Protein") %>%
+  pivot_longer(cols = -Protein, names_to = "CellType", values_to = "Expressed") %>%
+  filter(Expressed == TRUE)
+
+# Create the dotplot
+dotplot <- ggplot(plot_data, aes(x = CellType, y = Protein)) +
+  geom_point(size = 3, color = "blue") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 8)
+  ) +
+  labs(
+    title = "Highly Expressed Proteins Across Cell Types",
+    x = "Cell Type",
+    y = "Protein"
+  )
+
+# Display the plot
+print(dotplot)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```         
+```
+
+##### Save the transformed datasets
+
+```{r}
+
+saveRDS(spe_chemo, "saved_data/transformed_spe_chemo_Spatial_Graph.rds" )
+```
+
+```{r}
+
+saveRDS(spe_chemo_immu, "saved_data/transformed_spe_chemo_immu_Spatial_Graph.rds" )
+```
+
+#### Extract spe_chemo data with Biopsyphase having 3 columns
+
+```{r}
+
+# Extract the colData from the SpatialExperiment object
+col_data <- colData(spe_chemo)
+
+# Check unique values in BiopsyPhase to confirm
+unique_biopsy_phases <- unique(col_data$BiopsyPhase)
+print(unique_biopsy_phases)
+
+# Convert colData to a data.frame
+col_data_df <- as.data.frame(col_data)
+
+# Now you can use dplyr functions on col_data_df
+patients_with_all_phases <- col_data_df %>%
+  group_by(PatientID) %>%
+  filter(all(c("On-treatment", "Baseline", "Post-treatment") %in% BiopsyPhase)) %>%
+  summarize() %>%
+  pull(PatientID)
+
+# Filter the original data for these PatientIDs
+filtered_indices <- which(col_data$PatientID %in% patients_with_all_phases)
+
+# Extract the relevant data
+if (length(filtered_indices) > 0) {
+    filtered_spe_chemo <- spe_chemo[, filtered_indices]
+} else {
+    stop("No entries found for patients with all BiopsyPhase values.")
+}
+
+# Print out the structure of the filtered SpatialExperiment
+print(filtered_spe_chemo)
+```
+
+```{r}
+```
+
+#### Extract spe_chemo_Immu data with Biopsyphase having 3 columns
+
+```{r}
+
+# Extract the colData from the SpatialExperiment object
+col_data1 <- colData(spe_chemo_immu)
+
+# Check unique values in BiopsyPhase to confirm
+unique_biopsy_phases1 <- unique(col_data1$BiopsyPhase)
+print(unique_biopsy_phases1)
+
+# Convert colData to a data.frame
+col_data_df1 <- as.data.frame(col_data1)
+
+# Now you can use dplyr functions on col_data_df
+patients_with_all_phases1 <- col_data_df1 %>%
+  group_by(PatientID) %>%
+  filter(all(c("On-treatment", "Baseline", "Post-treatment") %in% BiopsyPhase)) %>%
+  summarize() %>%
+  pull(PatientID)
+
+# Filter the original data for these PatientIDs
+filtered_indices1 <- which(col_data1$PatientID %in% patients_with_all_phases1)
+
+# Extract the relevant data
+if (length(filtered_indices) > 0) {
+    filtered_spe_chemo_immu <- spe_chemo_immu[, filtered_indices1]
+} else {
+    stop("No entries found for patients with all BiopsyPhase values.")
+}
+
+# Print out the structure of the filtered SpatialExperiment
+print(filtered_spe_chemo_immu)
+```
+
+```{r}
+sort(unique(filtered_spe_chemo$PatientID))
+
+```
+
+```{r}
+
+```
+
+```{r}
+sort(unique(filtered_spe_chemo_immu$PatientID))
+
+```
+
+```{r}
+
+```
+
+#### Find all the highest expressed biomarkers in each cell typeGetting the data for patient with ID NT009 to get parameters for the model using the chemotherapy only dataset.
+
+```{r}
+# Subsetting based on the column 'Arm' Chemotherapy
+
+spe_chemotherapy_patient_1 <- spe_chemo[, colData(spe_chemo)$PatientID == "NT009"]
+
+spe_chemotherapy_patient_1
+```
+
+```{r}
+
+# Generate the plot using the color column in colData
+dittoDimPlot(
+  spe_chemotherapy_patient_1, 
+  var = "ParentCell", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE
+) +
+  theme(legend.title = element_blank()) +
+  ggtitle("Patient NT009 Cell types on UMAP for spe_chemotherapy")
+```
+
+```{r}
+
+# Function to count cells by type and biopsyphase
+count_cells_by_type_and_phase <- function(spe) {
+  # Extract cell type and biopsyphase information from colData
+  cell_data <- as.data.frame(colData(spe))
+  
+  # Ensure 'ParentCell' and 'BiopsyPhase' columns exist
+  if (!all(c("ParentCell", "BiopsyPhase") %in% colnames(cell_data))) {
+    stop("Both 'ParentCell' and 'BiopsyPhase' columns must be present in colData")
+  }
+  
+  # Count cells
+  cell_counts <- cell_data %>%
+    group_by(ParentCell, BiopsyPhase) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    pivot_wider(names_from = BiopsyPhase, values_from = count, values_fill = 0)
+  
+  # Calculate total for each cell type
+  cell_counts$Total <- rowSums(cell_counts[, -1])
+  
+  # Reorder columns to have Total as the second column
+  cell_counts <- cell_counts %>%
+    select(ParentCell, Total, everything())
+  
+  return(cell_counts)
+}
+
+```
+
+```{r}
+
+# Main analysis script
+main_analysis <- function(spe) {
+  # Perform cell count analysis
+  result <- count_cells_by_type_and_phase(spe)
+  
+  # Print the result
+  print(result)
+  
+  # Optionally, you can save the result to a CSV file
+  # write.csv(result, "cell_count_analysis_result.csv", row.names = FALSE)
+  
+  return(result)
+  
+}
+```
+
+```{r}
+
+result <- main_analysis(spe_chemotherapy_patient_1)
+result <- result %>% filter(ParentCell != "Other")
+result
+```
+
+```{r}
+
+# Function to calculate column-wise statistics
+calculate_column_stats <- function(data, column) {
+  total_cells <- sum(data[[column]])
+  ratios <- data[[column]] / total_cells
+  variance <- var(data[[column]])
+  
+  tibble(
+    ParentCell = data$ParentCell,
+    Column = column,
+    Count = data[[column]],
+    Total_in_Column = total_cells,
+    Ratio = round(ratios, 4),
+    Proportion_Percent = round(ratios * 100, 2),
+    Column_Variance = round(variance, 2)
+  )
+}
+
+```
+
+```{r}
+
+# Calculate statistics for each column
+columns_to_analyze <- c("Total", "Baseline", "On-treatment", "Post-treatment")
+all_stats <- map_dfr(columns_to_analyze, ~calculate_column_stats(result, .x))
+
+# Calculate cell type specific statistics
+cell_type_stats <- result %>%
+  pivot_longer(
+    cols = -ParentCell,
+    names_to = "Phase",
+    values_to = "Count"
+  ) %>%
+  group_by(ParentCell) %>%
+  summarise(
+    Mean_Count = mean(Count),
+    SD = sd(Count),
+    Variance = var(Count),
+    CV = sd(Count)/mean(Count),
+    Min = min(Count),
+    Max = max(Count),
+    Range = max(Count) - min(Count),
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Calculate phase-specific statistics
+phase_stats <- all_stats %>%
+  group_by(Column) %>%
+  summarise(
+    Total_Cells = sum(Count),
+    Mean_Count = mean(Count),
+    SD = sd(Count),
+    Variance = var(Count),
+    CV = SD/Mean_Count,
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Create detailed ratio analysis
+ratio_analysis <- all_stats %>%
+  select(ParentCell, Column, Ratio) %>%
+  pivot_wider(
+    names_from = Column,
+    values_from = Ratio,
+    names_prefix = "Ratio_"
+  )
+
+# Create ratio variance analysis
+ratio_variance <- all_stats %>%
+  group_by(ParentCell) %>%
+  summarise(
+    Ratio_Mean = mean(Ratio),
+    Ratio_SD = sd(Ratio),
+    Ratio_Variance = var(Ratio),
+    Ratio_CV = Ratio_SD/Ratio_Mean,
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+```
+
+```{r}
+
+print(all_stats)
+
+```
+
+```{r}
+print(ratio_analysis)
+
+```
+
+```{r}
+
+print(ratio_variance)
+```
+
+```{r}
+
+# Function to calculate growth rate between two time points
+calculate_growth_rate <- function(N0, N1, time_interval = 1) {
+  # Using exponential growth formula: N1 = N0 * e^(r*t)
+  # Solving for r: r = ln(N1/N0)/t
+  r <- log(N1/N0) / time_interval
+  return(r)
+}
+
+# Function to estimate carrying capacity using logistic growth model
+estimate_carrying_capacity <- function(N0, N1, r, time_interval = 1) {
+  # Using logistic growth formula: K = N1*N0*exp(r*t)/(N0*(exp(r*t)-1))
+  # Where K is carrying capacity, r is growth rate, t is time interval
+  exp_rt <- exp(r * time_interval)
+  K <- (N1 * N0 * exp_rt) / (N0 * (exp_rt - 1))
+  return(K)
+}
+```
+
+```{r}
+
+library(minpack.lm) 
+```
+
+```{r}
+
+# Calculate carrying capacities and growth parameters
+carrying_capacity_analysis <- ratio_analysis %>%
+  mutate(
+    # Calculate growth rates
+    growth_rate = map2_dbl(
+      Ratio_Baseline, `Ratio_On-treatment`,
+      ~calculate_growth_rate(.x, .y)
+    ),
+    
+    # Calculate basic carrying capacity estimate
+    carrying_capacity_basic = map2_dbl(
+      Ratio_Baseline, `Ratio_On-treatment`,
+      ~max(.x, .y) * 1.5  # Simple initial estimate
+    ),
+    
+    # Calculate refined carrying capacity
+    carrying_capacity = pmap_dbl(
+      list(Ratio_Baseline, `Ratio_On-treatment`, growth_rate),
+      estimate_carrying_capacity
+    ),
+    
+    # Calculate additional metrics
+    density_dependent_factor = 1 - (Ratio_Baseline/carrying_capacity),
+    population_pressure = Ratio_Baseline/carrying_capacity,
+    growth_potential = carrying_capacity - Ratio_Baseline,
+    
+    # Calculate confidence metrics
+    carrying_capacity_lower = carrying_capacity * 0.8,  # 80% CI
+    carrying_capacity_upper = carrying_capacity * 1.2   # 80% CI
+  ) %>%
+  # Clean up extreme values
+  mutate(
+    carrying_capacity = ifelse(carrying_capacity < 0, NA, carrying_capacity),
+    carrying_capacity = ifelse(carrying_capacity > 1e6, NA, carrying_capacity)
+  ) %>%
+  # Round numeric columns
+  mutate(across(where(is.numeric), ~round(., 2)))
+```
+
+```{r}
+print(carrying_capacity_analysis %>% 
+      select(ParentCell, growth_rate, carrying_capacity, 
+             carrying_capacity_lower, carrying_capacity_upper,
+             population_pressure))
+
+```
+
+```         
+```
+
+#### 
+
+```{r}
+
+```
+
+#### Getting the mean expression values of some of the protein biomarkers in the various cell types for spe_chemotherapy Patient 1.
+
+```{r}
+
+extract_mean_expression_tidy <- function(spe, 
+                                         cell_type_column = "ParentCell", 
+                                         assay_name = "transformed_counts") {
+  # Check if the cell type column exists in colData
+  if (!cell_type_column %in% colnames(colData(spe))) {
+    stop(paste("Column", cell_type_column, "not found in colData"))
+  }
+  
+  # Check if the specified assay exists
+  if (!assay_name %in% assayNames(spe)) {
+    stop(paste("Assay", assay_name, "not found in the SpatialExperiment object"))
+  }
+  
+  # Extract expression data
+  expression_data <- assay(spe, assay_name)
+  
+  # Extract cell type information
+  cell_types <- colData(spe)$ParentCell
+  
+  # Calculate mean expression for each biomarker and cell type
+  mean_expression <- t(apply(expression_data, 1, function(x) tapply(x, cell_types, median, na.rm = TRUE)))
+  
+  # Convert to a tidy data frame
+  mean_expression_df <- as.data.frame(mean_expression) %>%
+    rownames_to_column("Biomarker") %>%
+    pivot_longer(cols = -Biomarker, names_to = "CellType", values_to = "MeanExpression")
+  
+  # Sort the data frame by CellType
+  mean_expression_df_sorted <- mean_expression_df %>%
+    arrange(CellType, Biomarker)
+  
+  return(mean_expression_df_sorted)
+}
+```
+
+```{r}
+
+results2 <- extract_mean_expression_tidy(spe_chemotherapy_patient_1, cell_type_column = "ParentCell",assay_name = "transformed_counts")
+
+results2 
+```
+
+```{r}
+
+biomarkers_of_interest <- c("CD31", "CD8", "CD163", "CD3", "PD-L1 (SP142)", "OX40","CD11c", "TOX", "PD-1", "IDO","ICOS","PD-L1 (73-10)","FOXP3","CD4", "PDGFRB", "PDPN", "Vimentin", "Caveolin-1", "HLA-DR", "SMA","Helios","AR","Ki67","CD45","CD68","Carboplatin","GZMB" )
+
+```
+
+```{r}
+
+# Extract mean expression for selected biomarkers
+result3 = results2[results2$Biomarker  %in% biomarkers_of_interest, ]
+result3
+```
+
+```{r}
+
+```
+
+#### 
+
+#### Find all the highest expressed biomarkers in each cell typeGetting the data for patient with ID NT010 to get parameters for the model using the chemotherapy only dataset.
+
+```{r}
+
+# Subsetting based on the column 'Arm' Chemotherapy
+
+spe_chemotherapy_patient_2 <- spe_chemo[, colData(spe_chemo)$PatientID == "NT010"]
+
+spe_chemotherapy_patient_2
+```
+
+```{r}
+
+# Generate the plot using the color column in colData
+dittoDimPlot(
+  spe_chemotherapy_patient_2, 
+  var = "ParentCell", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE
+) +
+  theme(legend.title = element_blank()) +
+  ggtitle("Patient NT010 Cell types on UMAP for spe_chemotherapy")
+```
+
+```{r}
+
+Patient2_result <- main_analysis(spe_chemotherapy_patient_2)
+Patient2_result <- Patient2_result %>% filter(ParentCell != "Other")
+Patient2_result
+```
+
+```{r}
+
+# Calculate statistics for each column
+columns_to_analyze <- c("Total", "Baseline", "On-treatment", "Post-treatment")
+all_stats <- map_dfr(columns_to_analyze, ~calculate_column_stats(Patient2_result, .x))
+
+# Calculate cell type specific statistics
+cell_type_stats <- Patient2_result %>%
+  pivot_longer(
+    cols = -ParentCell,
+    names_to = "Phase",
+    values_to = "Count"
+  ) %>%
+  group_by(ParentCell) %>%
+  summarise(
+    Mean_Count = mean(Count),
+    SD = sd(Count),
+    Variance = var(Count),
+    CV = sd(Count)/mean(Count),
+    Min = min(Count),
+    Max = max(Count),
+    Range = max(Count) - min(Count),
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Calculate phase-specific statistics
+phase_stats <- all_stats %>%
+  group_by(Column) %>%
+  summarise(
+    Total_Cells = sum(Count),
+    Mean_Count = mean(Count),
+    SD = sd(Count),
+    Variance = var(Count),
+    CV = SD/Mean_Count,
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Create detailed ratio analysis
+ratio_analysis <- all_stats %>%
+  select(ParentCell, Column, Ratio) %>%
+  pivot_wider(
+    names_from = Column,
+    values_from = Ratio,
+    names_prefix = "Ratio_"
+  )
+
+# Create ratio variance analysis
+ratio_variance <- all_stats %>%
+  group_by(ParentCell) %>%
+  summarise(
+    Ratio_Mean = mean(Ratio),
+    Ratio_SD = sd(Ratio),
+    Ratio_Variance = var(Ratio),
+    Ratio_CV = Ratio_SD/Ratio_Mean,
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+```
+
+```{r}
+
+print(ratio_analysis)
+```
+
+```{r}
+
+Patient2_results2 <- extract_mean_expression_tidy(spe_chemotherapy_patient_2, cell_type_column = "ParentCell",assay_name = "transformed_counts")
+
+Patient2_results2
+```
+
+```{r}
+
+# Extract mean expression for selected biomarkers
+Patient2_result3 = Patient2_results2[Patient2_results2$Biomarker  %in% biomarkers_of_interest, ]
+Patient2_result3
+```
+
+```{r}
+
+```
+
+#### Find all the highest expressed biomarkers in each cell typeGetting the data for patient with ID NT013 to get parameters for the model using the chemotherapy only dataset.
+
+```{r}
+
+# Subsetting based on the column 'Arm' Chemotherapy
+
+spe_chemotherapy_patient_3 <- spe_chemo[, colData(spe_chemo)$PatientID == "NT013"]
+
+spe_chemotherapy_patient_3
+```
+
+```{r}
+
+# Generate the plot using the color column in colData
+dittoDimPlot(
+  spe_chemotherapy_patient_3, 
+  var = "ParentCell", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE
+) +
+  theme(legend.title = element_blank()) +
+  ggtitle("Patient NT013 Cell types on UMAP for spe_chemotherapy")
+```
+
+```{r}
+
+Patient3_result <- main_analysis(spe_chemotherapy_patient_3)
+Patient3_result <- Patient3_result %>% filter(ParentCell != "Other")
+Patient3_result
+```
+
+```{r}
+
+# Calculate statistics for each column
+columns_to_analyze <- c("Total", "Baseline", "On-treatment", "Post-treatment")
+all_stats <- map_dfr(columns_to_analyze, ~calculate_column_stats(Patient3_result, .x))
+
+# Calculate cell type specific statistics
+cell_type_stats <- Patient3_result %>%
+  pivot_longer(
+    cols = -ParentCell,
+    names_to = "Phase",
+    values_to = "Count"
+  ) %>%
+  group_by(ParentCell) %>%
+  summarise(
+    Mean_Count = mean(Count),
+    SD = sd(Count),
+    Variance = var(Count),
+    CV = sd(Count)/mean(Count),
+    Min = min(Count),
+    Max = max(Count),
+    Range = max(Count) - min(Count),
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Calculate phase-specific statistics
+phase_stats <- all_stats %>%
+  group_by(Column) %>%
+  summarise(
+    Total_Cells = sum(Count),
+    Mean_Count = mean(Count),
+    SD = sd(Count),
+    Variance = var(Count),
+    CV = SD/Mean_Count,
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Create detailed ratio analysis
+ratio_analysis <- all_stats %>%
+  select(ParentCell, Column, Ratio) %>%
+  pivot_wider(
+    names_from = Column,
+    values_from = Ratio,
+    names_prefix = "Ratio_"
+  )
+
+# Create ratio variance analysis
+ratio_variance <- all_stats %>%
+  group_by(ParentCell) %>%
+  summarise(
+    Ratio_Mean = mean(Ratio),
+    Ratio_SD = sd(Ratio),
+    Ratio_Variance = var(Ratio),
+    Ratio_CV = Ratio_SD/Ratio_Mean,
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+```
+
+```{r}
+
+print(ratio_analysis)
+```
+
+```{r}
+
+Patient3_results2 <- extract_mean_expression_tidy(spe_chemotherapy_patient_3, cell_type_column = "ParentCell",assay_name = "transformed_counts")
+
+Patient3_results2
+```
+
+```{r}
+
+# Extract mean expression for selected biomarkers
+Patient3_result3 = Patient3_results2[Patient3_results2$Biomarker  %in% biomarkers_of_interest, ]
+Patient3_result3
+```
+
+```{r}
+
+```
+
+#### Find all the highest expressed biomarkers in each cell type. Getting the data for patient with ID NT022 to get parameters for the model using the chemotherapy only dataset.
+
+```{r}
+
+
+
+spe_chemotherapy_patient_4 <- spe_chemo[, colData(spe_chemo)$PatientID == "NT022"]
+
+spe_chemotherapy_patient_4
+```
+
+```{r}
+
+# Generate the plot using the color column in colData
+dittoDimPlot(
+  spe_chemotherapy_patient_4, 
+  var = "ParentCell", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE
+) +
+  theme(legend.title = element_blank()) +
+  ggtitle("Patient NT022 Cell types on UMAP for spe_chemotherapy")
+```
+
+```{r}
+
+Patient4_result <- main_analysis(spe_chemotherapy_patient_4)
+Patient4_result <- Patient4_result %>% filter(ParentCell != "Other")
+Patient4_result
+```
+
+```{r}
+
+# Calculate statistics for each column
+columns_to_analyze <- c("Total", "Baseline", "On-treatment", "Post-treatment")
+all_stats <- map_dfr(columns_to_analyze, ~calculate_column_stats(Patient4_result, .x))
+
+# Calculate cell type specific statistics
+cell_type_stats <- Patient4_result %>%
+  pivot_longer(
+    cols = -ParentCell,
+    names_to = "Phase",
+    values_to = "Count"
+  ) %>%
+  group_by(ParentCell) %>%
+  summarise(
+    Mean_Count = mean(Count),
+    SD = sd(Count),
+    Variance = var(Count),
+    CV = sd(Count)/mean(Count),
+    Min = min(Count),
+    Max = max(Count),
+    Range = max(Count) - min(Count),
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Calculate phase-specific statistics
+phase_stats <- all_stats %>%
+  group_by(Column) %>%
+  summarise(
+    Total_Cells = sum(Count),
+    Mean_Count = mean(Count),
+    SD = sd(Count),
+    Variance = var(Count),
+    CV = SD/Mean_Count,
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Create detailed ratio analysis
+ratio_analysis <- all_stats %>%
+  select(ParentCell, Column, Ratio) %>%
+  pivot_wider(
+    names_from = Column,
+    values_from = Ratio,
+    names_prefix = "Ratio_"
+  )
+
+# Create ratio variance analysis
+ratio_variance <- all_stats %>%
+  group_by(ParentCell) %>%
+  summarise(
+    Ratio_Mean = mean(Ratio),
+    Ratio_SD = sd(Ratio),
+    Ratio_Variance = var(Ratio),
+    Ratio_CV = Ratio_SD/Ratio_Mean,
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+```
+
+```{r}
+
+print(ratio_analysis)
+
+```
+
+```{r}
+
+Patient4_results2 <- extract_mean_expression_tidy(spe_chemotherapy_patient_4, cell_type_column = "ParentCell",assay_name = "transformed_counts")
+
+Patient4_results2
+```
+
+```{r}
+
+# Extract mean expression for selected biomarkers
+Patient4_result3 = Patient4_results2[Patient4_results2$Biomarker  %in% biomarkers_of_interest, ]
+Patient4_result3
+```
+
+```{r}
+
+```
+
+#### Find all the highest expressed biomarkers in each cell type. Getting the data for patient with ID NT023 to get parameters for the model using the chemotherapy only dataset.
+
+```{r}
+
+spe_chemotherapy_patient_5 <- spe_chemo[, colData(spe_chemo)$PatientID == "NT023"]
+
+spe_chemotherapy_patient_5
+```
+
+```{r}
+
+# Generate the plot using the color column in colData
+dittoDimPlot(
+  spe_chemotherapy_patient_5, 
+  var = "ParentCell", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE
+) +
+  theme(legend.title = element_blank()) +
+  ggtitle("Patient NT023 Cell types on UMAP for spe_chemotherapy")
+```
+
+```{r}
+
+Patient5_result <- main_analysis(spe_chemotherapy_patient_5)
+Patient5_result <- Patient5_result %>% filter(ParentCell != "Other")
+Patient5_result
+```
+
+```{r}
+
+# Calculate statistics for each column
+columns_to_analyze <- c("Total", "Baseline", "On-treatment", "Post-treatment")
+all_stats <- map_dfr(columns_to_analyze, ~calculate_column_stats(Patient5_result, .x))
+
+# Calculate cell type specific statistics
+cell_type_stats <- Patient5_result %>%
+  pivot_longer(
+    cols = -ParentCell,
+    names_to = "Phase",
+    values_to = "Count"
+  ) %>%
+  group_by(ParentCell) %>%
+  summarise(
+    Mean_Count = mean(Count),
+    SD = sd(Count),
+    Variance = var(Count),
+    CV = sd(Count)/mean(Count),
+    Min = min(Count),
+    Max = max(Count),
+    Range = max(Count) - min(Count),
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Calculate phase-specific statistics
+phase_stats <- all_stats %>%
+  group_by(Column) %>%
+  summarise(
+    Total_Cells = sum(Count),
+    Mean_Count = mean(Count),
+    SD = sd(Count),
+    Variance = var(Count),
+    CV = SD/Mean_Count,
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Create detailed ratio analysis
+ratio_analysis <- all_stats %>%
+  select(ParentCell, Column, Ratio) %>%
+  pivot_wider(
+    names_from = Column,
+    values_from = Ratio,
+    names_prefix = "Ratio_"
+  )
+
+# Create ratio variance analysis
+ratio_variance <- all_stats %>%
+  group_by(ParentCell) %>%
+  summarise(
+    Ratio_Mean = mean(Ratio),
+    Ratio_SD = sd(Ratio),
+    Ratio_Variance = var(Ratio),
+    Ratio_CV = Ratio_SD/Ratio_Mean,
+    .groups = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+```
+
+```{r}
+
+print(ratio_analysis)
+```
+
+```{r}
+
+Patient5_results2 <- extract_mean_expression_tidy(spe_chemotherapy_patient_5, cell_type_column = "ParentCell",assay_name = "transformed_counts")
+
+Patient5_results2
+```
+
+```{r}
+
+# Extract mean expression for selected biomarkers
+Patient5_result3 = Patient5_results2[Patient5_results2$Biomarker  %in% biomarkers_of_interest, ]
+Patient5_result3
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### Chemo & Immuno analysis
+
+#### Find all the highest expressed biomarkers in each cell typeGetting the data for patient with ID NT001 to get parameters for the model using the chemotherapy only dataset.
+
+```         
+```
+
+```{r}
+
+# Subsetting based on the column 'Arm' Chemotherapy
+
+spe_chemo_immu_patient_1 <- spe_chemo_immu[, colData(spe_chemo_immu)$PatientID == "NT001"]
+
+spe_chemo_immu_patient_1
+```
+
+```{r}
+
+# Generate the plot using the color column in colData
+dittoDimPlot(
+  spe_chemo_immu_patient_1, 
+  var = "ParentCell", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE
+) +
+  theme(legend.title = element_blank()) +
+  ggtitle("Patient NT001 Cell types on UMAP for spe_chemo_immu_patient_1")
+```
+
+```{r}
+## Count number of cells in each timepoint
+
+result4 <- main_analysis(spe_chemo_immu_patient_1)
+result4
+```
+
+```{r}
+
+# Subsetting based on the column 'Arm' Chemotherapy
+
+spe_chemo_immu_patient_2 <- spe_chemo_immu[, colData(spe_chemo_immu)$PatientID == "NT002"]
+
+spe_chemo_immu_patient_2
+
+result5 <- main_analysis(spe_chemo_immu_patient_2)
+result5
+```
+
+#### Getting the mean expression values of some of the protein biomarkers in the various cell types for spe_chemotherapy.
+
+```{r}
+
+## aggregate by cell type
+celltype_mean <- aggregateAcrossCells(as(spe_chemotherapy, "SingleCellExperiment"),  
+                     ids = spe_chemotherapy$ParentCell, 
+                     statistics = "mean",
+                     use.assay.type = "exprs", 
+                     subset.row = type_markers)
+
+
+
+# Step 3: Ensure cell type metadata is correctly assigned
+# Use unique 'spe$Label' values for cell type annotations
+colData(celltype_mean)$celltype <- factor(unique(spe_chemotherapy$ParentCell))
+
+# Step 4: Count the number of cells per aggregated cell type
+colData(celltype_mean)$ncells <- as.numeric(table(spe_chemotherapy$ParentCell)[unique(spe_chemotherapy$ParentCell)])
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

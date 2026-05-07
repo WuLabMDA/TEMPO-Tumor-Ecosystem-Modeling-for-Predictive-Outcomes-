@@ -1,0 +1,147 @@
+%% Chemotherapy PCA + UMAP Comparison Between PCR and RD Datasets (Celltype + Fuzzy Matching)
+clear; clc; close all;
+
+%% ---------------- Load the Data ----------------
+filePCR = 'Chemotherapy_Consolidated_PCR_Data.csv';
+fileRD  = 'Chemotherapy_Consolidated_RD_Data.csv';
+
+fprintf('Loading data...\n');
+tPCR = readtable(filePCR);
+tRD  = readtable(fileRD);
+
+fprintf('Loaded PCR data (%d rows, %d cols)\n', size(tPCR,1), size(tPCR,2));
+fprintf('Loaded RD data (%d rows, %d cols)\n', size(tRD,1), size(tRD,2));
+
+%% ---------------- Normalize Column Names ----------------
+normalizeNames = @(names) lower(regexprep(names, '[^a-zA-Z0-9]', ''));
+stdNamesPCR = normalizeNames(tPCR.Properties.VariableNames);
+stdNamesRD  = normalizeNames(tRD.Properties.VariableNames);
+
+%% ---------------- Fuzzy Matching Columns ----------------
+matchedPCR = [];
+matchedRD  = [];
+matchPairs = {};
+simScores  = [];
+
+for i = 1:length(stdNamesPCR)
+    n1 = stdNamesPCR{i};
+    distances = cellfun(@(n2) editDistance(n1, n2), stdNamesRD);
+    [minDist, idx] = min(distances);
+    simScore = 1 - (minDist / max(strlength(n1), strlength(stdNamesRD{idx})));
+    if simScore > 0.85
+        matchedPCR(end+1) = i;
+        matchedRD(end+1)  = idx;
+        matchPairs{end+1,1} = n1;
+        matchPairs{end,2}   = stdNamesRD{idx};
+        simScores(end+1) = simScore;
+    end
+end
+
+fprintf('Matched columns (fuzzy): %d\n', numel(matchedPCR));
+if isempty(matchedPCR), error('No matching columns found.'); end
+
+tPCR = tPCR(:, matchedPCR);
+tRD  = tRD(:, matchedRD);
+
+commonNames = stdNamesPCR(matchedPCR);
+tPCR.Properties.VariableNames = commonNames;
+tRD.Properties.VariableNames  = commonNames;
+
+% Save fuzzy match report
+matchSummary = table(matchPairs(:,1), matchPairs(:,2), simScores', ...
+    'VariableNames', {'PCR_Name','RD_Name','Similarity'});
+writetable(matchSummary, 'Fuzzy_Match_Report.csv');
+fprintf('📄 Fuzzy match summary saved to Fuzzy_Match_Report.csv\n');
+
+%% ---------------- Harmonize Data Types ----------------
+for v = 1:numel(commonNames)
+    colPCR = tPCR.(commonNames{v});
+    colRD  = tRD.(commonNames{v});
+    if iscell(colPCR) && isnumeric(colRD), tPCR.(commonNames{v}) = str2double(colPCR); end
+    if iscell(colRD) && isnumeric(colPCR), tRD.(commonNames{v}) = str2double(colRD); end
+    if iscell(tPCR.(commonNames{v})), tPCR.(commonNames{v}) = string(tPCR.(commonNames{v})); end
+    if iscell(tRD.(commonNames{v})), tRD.(commonNames{v}) = string(tRD.(commonNames{v})); end
+end
+
+%% ---------------- Combine Data ----------------
+tPCR.SurvivalStatus = repmat("PCR", height(tPCR), 1);
+tRD.SurvivalStatus  = repmat("RD", height(tRD), 1);
+T = [tPCR; tRD];
+
+%% ---------------- Define Base Cell Types ----------------
+base_cell_types = {'cancercells','regulatorytcell','effectortcells',...
+                   'macrophages','endothelialcells','fibroblast'};
+
+% Find all columns corresponding to these cell types
+cell_cols = [];
+cell_labels = {};
+for i = 1:length(base_cell_types)
+    idx = find(contains(lower(T.Properties.VariableNames), base_cell_types{i}));
+    cell_cols = [cell_cols, idx];
+    cell_labels = [cell_labels, repmat(base_cell_types(i), 1, length(idx))];
+end
+
+if isempty(cell_cols)
+    error('No matching cell type columns found in the dataset.');
+end
+
+%% ---------------- Extract Numeric Data ----------------
+X = T{:, cell_cols};
+X = fillmissing(X,'constant',0);
+
+labels_survival = T.SurvivalStatus;  % For Figures 1 & 2
+labels_celltype = repmat("Unknown", height(T), 1);
+
+% Assign cell type label for each row based on max expression
+[~, maxIdx] = max(X, [], 2);
+labels_celltype = cell_labels(maxIdx)';
+
+%% ---------------- Global PCA & UMAP by SurvivalStatus ----------------
+[~, score, ~, ~, explained] = pca(X);
+
+% Figure 1: PCA colored by SurvivalStatus
+f1 = figure('Color','w');
+gscatter(score(:,1), score(:,2), labels_survival, 'rb', 'o^', 8);
+xlabel(sprintf('PC1 (%.1f%%)', explained(1)));
+ylabel(sprintf('PC2 (%.1f%%)', explained(2)));
+title('Global PCA - SurvivalStatus');
+legend('PCR','RD','Location','best');
+grid on; set(gca,'FontSize',12,'FontWeight','bold');
+exportgraphics(f1,'Figure1_GlobalPCA_Survival.png','Resolution',600);
+
+% Figure 2: UMAP colored by SurvivalStatus
+rng(42);
+try
+    Y = run_umap(score(:,1:min(10,size(score,2))), 'n_neighbors', 15, 'min_dist', 0.3);
+catch
+    Y = tsne(score(:,1:min(10,size(score,2))));
+end
+f2 = figure('Color','w');
+gscatter(Y(:,1), Y(:,2), labels_survival, 'rb', 'o^', 8);
+xlabel('UMAP1'); ylabel('UMAP2');
+title('Global UMAP - SurvivalStatus');
+legend('PCR','RD','Location','best');
+grid on; set(gca,'FontSize',12,'FontWeight','bold');
+exportgraphics(f2,'Figure2_GlobalUMAP_Survival.png','Resolution',600);
+
+%% ---------------- Global PCA & UMAP by CellType ----------------
+% Figure 3: PCA colored by CellType
+f3 = figure('Color','w');
+gscatter(score(:,1), score(:,2), labels_celltype, lines(length(base_cell_types)), 'o', 8);
+xlabel(sprintf('PC1 (%.1f%%)', explained(1)));
+ylabel(sprintf('PC2 (%.1f%%)', explained(2)));
+title('Global PCA - CellType');
+legend('Location','bestoutside');
+grid on; set(gca,'FontSize',12,'FontWeight','bold');
+exportgraphics(f3,'Figure3_GlobalPCA_CellType.png','Resolution',600);
+
+% Figure 4: UMAP colored by CellType
+f4 = figure('Color','w');
+gscatter(Y(:,1), Y(:,2), labels_celltype, lines(length(base_cell_types)), 'o', 8);
+xlabel('UMAP1'); ylabel('UMAP2');
+title('Global UMAP - CellType');
+legend('Location','bestoutside');
+grid on; set(gca,'FontSize',12,'FontWeight','bold');
+exportgraphics(f4,'Figure4_GlobalUMAP_CellType.png','Resolution',600);
+
+fprintf('✅ Figures 1–4 generated successfully.\n');

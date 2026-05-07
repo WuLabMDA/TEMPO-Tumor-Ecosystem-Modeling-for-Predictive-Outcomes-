@@ -1,0 +1,3354 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+
+setwd('V:/dkmarri/Breast_Cancer_IMC_Data/R_Codes')
+```
+
+```{r}
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(cluster)
+library(factoextra)
+library(caret)
+library(pROC)
+library(glmnet)
+library(reshape2)
+library(tidyr)
+library(readxl)
+```
+
+```{r}
+
+#set.seed(23)
+```
+
+```{r}
+
+# Load the data (update the file path accordingly)
+Chemo_data <- read_excel("saved_data/Chemo_model_for_box_plot.xlsx")
+
+Chemo_data
+```
+
+#### Growth Rate
+
+```{r}
+
+# Reshape the data from wide to long format for the selected variables
+Chemo_data_growth <- Chemo_data %>%
+  select(Patient, Gr_CC, Gr_Treg, Gr_Teff, Gr_M, Gr_EC, Gr_F, Survival)
+
+
+Chemo_data_growth
+```
+
+```{r}
+
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(gridExtra)
+library(ggsignif)
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Function to create enhanced distribution analysis
+analyze_growth_rates <- function(data) {
+  # Remove Patient column and gather growth rate variables
+  long_data <- data %>%
+    select(-Patient) %>%
+    pivot_longer(
+      cols = starts_with("Gr_"),
+      names_to = "Cell_Type",
+      values_to = "Growth_Rate"
+    ) %>%
+    mutate(Cell_Type = str_remove(Cell_Type, "Gr_"))
+  
+  # Create individual density plots for each cell type and survival status
+  density_plots <- list()
+  cell_types <- unique(long_data$Cell_Type)
+  survival_types <- unique(long_data$Survival)
+  
+  for(cell in cell_types) {
+    for(surv in survival_types) {
+      plot_data <- long_data %>% 
+        filter(Cell_Type == cell, Survival == surv)
+      
+      plot_title <- paste("Growth Rate Distribution -", cell, "-", surv)
+      plot_color <- if(surv == "pCR") "#2ECC71" else "#E74C3C"
+      
+      p <- ggplot(plot_data, aes(x = Growth_Rate)) +
+        geom_density(fill = plot_color, alpha = 0.7) +
+        theme_minimal() +
+        labs(
+          title = plot_title,
+          x = "Growth Rate",
+          y = "Density"
+        ) +
+        theme(
+          plot.title = element_text(face = "bold", size = 12),
+          axis.title = element_text(size = 10, face = "bold"),
+          axis.text = element_text(
+            size = 9,
+            face = "bold",
+            color = "black"
+          ),
+          axis.text.x = element_text(
+            face = "bold",
+            color = "black"
+          ),
+          axis.text.y = element_text(
+            face = "bold",
+            color = "black"
+          ),
+          plot.margin = margin(10, 10, 10, 10)
+        ) +
+        scale_x_continuous(
+          limits = c(0, 10),
+          breaks = seq(0, 10, 2)
+        ) +
+        scale_y_continuous(
+          expand = expansion(mult = c(0, 0.05)),
+          breaks = function(x) pretty(x, n = 5)
+        )
+      
+      density_plots[[paste(cell, surv, sep = "_")]] <- p
+    }
+  }
+  
+  # Calculate summary statistics
+  summary_stats <- long_data %>%
+    group_by(Cell_Type, Survival) %>%
+    summarise(
+      n = n(),
+      mean = mean(Growth_Rate),
+      sd = sd(Growth_Rate),
+      median = median(Growth_Rate),
+      q1 = quantile(Growth_Rate, 0.25),
+      q3 = quantile(Growth_Rate, 0.75),
+      .groups = "drop"
+    )
+  
+  # Perform statistical tests
+  stat_tests <- long_data %>%
+    group_by(Cell_Type) %>%
+    wilcox_test(Growth_Rate ~ Survival) %>%
+    adjust_pvalue(method = "bonferroni") %>%
+    add_significance()
+  
+  # Return results as a list
+  return(list(
+    density_plots = density_plots,
+    statistics = stat_tests,
+    summary = summary_stats
+  ))
+}
+```
+
+```{r}
+
+results <- analyze_growth_rates(Chemo_data_growth)
+```
+
+```{r}
+ # Display all plots in a grid (4x3 arrangement for 12 plots)
+plot_grid <- do.call(grid.arrange, 
+                     c(results$density_plots, 
+                       ncol = 3, 
+                       nrow = 4))
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "CC_pCR_density_plot.png",    # File name
+  plot = results$density_plots[["CC_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+results$density_plots[["CC_pCR"]]
+```
+
+```{r}
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "Treg_pCR_density_plot.png",    # File name
+  plot = results$density_plots[["Treg_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+results$density_plots[["Treg_pCR"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "Teff_pCR_density_plot.png",    # File name
+  plot = results$density_plots[["Teff_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+# Or display individual plots
+results$density_plots[["Teff_pCR"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "M_pCR_density_plot.png",    # File name
+  plot = results$density_plots[["M_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+# Or display individual plots
+results$density_plots[["M_pCR"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "EC_pCR_density_plot.png",    # File name
+  plot = results$density_plots[["EC_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+# Or display individual plots
+results$density_plots[["EC_pCR"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "F_pCR_density_plot.png",    # File name
+  plot = results$density_plots[["F_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+# Or display individual plots
+results$density_plots[["F_pCR"]]  # View specific plot
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "CC_RD_density_plot.png",    # File name
+  plot = results$density_plots[["CC_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+# Or display individual plots
+results$density_plots[["CC_RD"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "Treg_RD_density_plot.png",    # File name
+  plot = results$density_plots[["Treg_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+# Or display individual plots
+results$density_plots[["Treg_RD"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "Teff_RD_density_plot.png",    # File name
+  plot = results$density_plots[["Teff_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+# Or display individual plots
+results$density_plots[["Teff_RD"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "M_RD_density_plot.png",    # File name
+  plot = results$density_plots[["M_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+# Or display individual plots
+results$density_plots[["M_RD"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "EC_RD_density_plot.png",    # File name
+  plot = results$density_plots[["EC_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+# Or display individual plots
+results$density_plots[["EC_RD"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "F_RD_density_plot.png",    # File name
+  plot = results$density_plots[["F_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+# Or display individual plots
+results$density_plots[["F_RD"]]  # View specific plot
+```
+
+```{r}
+#  View summary statistics
+ print(results$summary)
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Reshape data from wide to long format
+long_data <- Chemo_data_growth %>%
+  pivot_longer(
+    cols = starts_with("Gr_"),
+    names_to = "Cell_Type",
+    values_to = "Growth_Rate"
+  ) %>%
+  mutate(Cell_Type = gsub("Gr_", "", Cell_Type))
+
+long_data
+```
+
+```{r}
+
+
+# Basic high-resolution PNG
+png(filename = "Growth_rate_box.png",
+    width = 3000,
+    height = 2000,
+    res = 300,
+    units = "px")
+
+
+# Create the box plot
+ggplot(long_data, aes(x = Cell_Type, y = Growth_Rate, fill = Survival)) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(
+    title = "Growth Rate Comparison by Cell Type and Survival Status",
+    x = "Cell Type",
+    y = "Growth Rate",
+    fill = "Survival Status"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+    
+  ) +
+  scale_fill_manual(values = c("pCR" = "#3498db", "RD" = "#e74c3c"))+
+  theme(
+    text = element_text(size = 16, face = "bold"),        # Set font size and make it bold
+    axis.title = element_text(size = 16, face = "bold"), # Bold axis titles
+    axis.text = element_text(size = 16),                # Increase font size for axis text
+    legend.text = element_text(size = 16),              # Increase font size for legend
+    plot.title = element_text(size = 16, face = "bold") # Bold plot title
+  )
+
+dev.off()
+```
+
+```{r}
+
+```
+
+```{r}
+
+stat.test <- long_data %>%
+  group_by(Cell_Type) %>%
+  wilcox_test(Growth_Rate ~ Survival) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_significance("p.adj")
+
+stat.test
+```
+
+```{r}
+ # Basic high-resolution PNG
+ png(filename = "Growth_rate_box_with_stats.png",
+     width = 3000,
+     height = 2000,
+     res = 300,
+     units = "px")
+
+# Create a box plot
+bxp <- ggboxplot(
+  long_data, x = "Cell_Type", y = "Growth_Rate", 
+  color = "Survival", palette = c("pCR" = "#3498db", "RD" = "#e74c3c")
+  )+
+   theme(
+    text = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 16, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold")
+  )
+
+
+# Add p-values onto the box plots
+stat.test <- stat.test %>%
+  add_xy_position(x = "Cell_Type", dodge = 0.8)
+bxp + stat_pvalue_manual(
+  stat.test,  label = "p", tip.length = 0, label.size = 12,   
+    fontface = "bold" 
+  )
+# Add 10% spaces between the p-value labels and the plot border
+bxp + stat_pvalue_manual(
+  stat.test,  label = "p", tip.length = 0, label.size = 6,   
+    fontface = "bold" 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+
+dev.off()
+```
+
+```{r}
+# Use adjusted p-values as labels
+# Remove brackets
+bxp + stat_pvalue_manual(
+  stat.test,  label = "p.adj", tip.length = 0,
+  remove.bracket = TRUE
+  )
+
+# Show adjusted p-values and significance levels
+# Hide ns (non-significant)
+bxp + stat_pvalue_manual(
+  stat.test,  label = "{p.adj}{p.adj.signif}", 
+  tip.length = 0, hide.ns = TRUE
+  )
+```
+
+```{r}
+# Additional statistical test
+stat.test2 <- long_data %>%
+  wilcox_test(Growth_Rate ~ Cell_Type, p.adjust.method = "bonferroni")
+stat.test2
+```
+
+```{r}
+
+
+
+stat.test <- stat.test %>%
+  add_xy_position(x = "Cell_Type", dodge = 0.8)
+bxp.complex <- bxp + stat_pvalue_manual(
+  stat.test,  label = "p", tip.length = 0,label.size = 4,   
+    fontface = "bold" 
+  )
+# 2. Add stat.test2
+
+
+
+
+
+# Add more space between brackets using `step.increase` 
+stat.test2 <- stat.test2 %>% add_xy_position(x = "Cell_Type")
+bxp.complex <- bxp.complex + 
+  stat_pvalue_manual(
+    stat.test2,  label = "p", tip.length = 0.02,
+    step.increase = 0.05,label.size = 4,   
+    fontface = "bold" 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))+
+  theme(
+    text = element_text(size = 16, face = "bold"),        # Set font size and make it bold
+    axis.title = element_text(size = 16, face = "bold"), # Bold axis titles
+    axis.text = element_text(size = 16),                # Increase font size for axis text
+    legend.text = element_text(size = 16),              # Increase font size for legend
+    plot.title = element_text(size = 16, face = "bold") # Bold plot title
+  )
+
+# 3. Display the plot
+bxp.complex 
+
+
+```
+
+```{r}
+
+# Create the box plot
+ggplot(long_data, aes(x = Patient, y = Growth_Rate, fill = Survival)) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(
+    title = "Growth Rate Comparison by Cell Type and Survival Status",
+    x = "Cell Type",
+    y = "Growth Rate",
+    fill = "Survival Status"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  scale_fill_manual(values = c("pCR" = "#3498db", "RD" = "#e74c3c"))
+```
+
+```{r}
+
+```
+
+#### Inhibition Rate
+
+```{r}
+
+# Reshape the data from wide to long format for the selected variables
+Chemo_data_inhibit <- Chemo_data %>%
+  select(Patient, In_CC, In_Treg, In_Teff, In_M, In_EC, In_F, Survival)
+
+
+Chemo_data_inhibit
+```
+
+```{r}
+
+
+# Function to create enhanced distribution analysis
+analyze_inhibition_rates <- function(data) {
+  # Remove Patient column and gather growth rate variables
+  long_data <- data %>%
+    select(-Patient) %>%
+    pivot_longer(
+      cols = starts_with("In_"),
+      names_to = "Cell_Type",
+      values_to = "Inhibition_Rate"
+    ) %>%
+    mutate(Cell_Type = str_remove(Cell_Type, "In_"))
+  
+  # Create individual density plots for each cell type and survival status
+  density_plots <- list()
+  cell_types <- unique(long_data$Cell_Type)
+  survival_types <- unique(long_data$Survival)
+  
+  for(cell in cell_types) {
+    for(surv in survival_types) {
+      plot_data <- long_data %>% 
+        filter(Cell_Type == cell, Survival == surv)
+      
+      plot_title <- paste("Inhibition Rate Distribution -", cell, "-", surv)
+      plot_color <- if(surv == "pCR") "#2ECC71" else "#E74C3C"
+      
+      p <- ggplot(plot_data, aes(x = Inhibition_Rate)) +
+        geom_density(fill = plot_color, alpha = 0.7) +
+        theme_minimal() +
+        labs(
+          title = plot_title,
+          x = "Inhibition Rate",
+          y = "Density"
+        ) +
+        theme(
+          plot.title = element_text(face = "bold", size = 12),
+          axis.title = element_text(size = 10, face = "bold"),
+          axis.text = element_text(
+            size = 9,
+            face = "bold",
+            color = "black"
+          ),
+          axis.text.x = element_text(
+            face = "bold",
+            color = "black"
+          ),
+          axis.text.y = element_text(
+            face = "bold",
+            color = "black"
+          ),
+          plot.margin = margin(10, 10, 10, 10)
+        ) +
+        scale_x_continuous(
+          limits = c(0, 10),
+          breaks = seq(0, 10, 2)
+        ) +
+        scale_y_continuous(
+          expand = expansion(mult = c(0, 0.05)),
+          breaks = function(x) pretty(x, n = 5)
+        )
+      
+      density_plots[[paste(cell, surv, sep = "_")]] <- p
+    }
+  }
+  
+  # Calculate summary statistics
+  summary_stats <- long_data %>%
+    group_by(Cell_Type, Survival) %>%
+    summarise(
+      n = n(),
+      mean = mean(Inhibition_Rate),
+      sd = sd(Inhibition_Rate),
+      median = median(Inhibition_Rate),
+      q1 = quantile(Inhibition_Rate, 0.25),
+      q3 = quantile(Inhibition_Rate, 0.75),
+      .groups = "drop"
+    )
+  
+  # Perform statistical tests
+  stat_tests <- long_data %>%
+    group_by(Cell_Type) %>%
+    wilcox_test(Inhibition_Rate ~ Survival) %>%
+    adjust_pvalue(method = "bonferroni") %>%
+    add_significance()
+  
+  # Return results as a list
+  return(list(
+    density_plots = density_plots,
+    statistics = stat_tests,
+    summary = summary_stats
+  ))
+}
+```
+
+```{r}
+
+results1 <- analyze_inhibition_rates(Chemo_data_inhibit)
+```
+
+```{r}
+ # Display all plots in a grid (4x3 arrangement for 12 plots)
+plot_grid <- do.call(grid.arrange, 
+                     c(results1$density_plots, 
+                       ncol = 3, 
+                       nrow = 4))
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "CC_pCR_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["CC_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+# Or display individual plots
+results1$density_plots[["CC_pCR"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "CC_RD_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["CC_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+results1$density_plots[["CC_RD"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "Treg_pCR_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["Treg_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+results1$density_plots[["Treg_pCR"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "Treg_RD_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["Treg_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+results1$density_plots[["Treg_RD"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "Teff_pCR_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["Teff_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+results1$density_plots[["Teff_pCR"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "Teff_RD_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["Teff_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+results1$density_plots[["Teff_RD"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "M_pCR_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["M_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+results1$density_plots[["M_pCR"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "M_RD_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["M_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+results1$density_plots[["M_RD"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "EC_pCR_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["EC_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+results1$density_plots[["EC_pCR"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "EC_RD_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["EC_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+results1$density_plots[["EC_RD"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "F_pCR_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["F_pCR"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+
+
+results1$density_plots[["F_pCR"]]  # View specific plot
+```
+
+```{r}
+
+# Save the specific density plot as a high-resolution PNG
+ggsave(
+  filename = "F_RD_inhibition_density_plot.png",    # File name
+  plot = results1$density_plots[["F_RD"]],  # Specify the plot
+  width = 4,    # Width in inches (adjustable)
+  height = 3,   # Height in inches (adjustable)
+  dpi = 1200,    # High resolution
+  units = "in"  # Ensure correct scaling
+)
+
+results1$density_plots[["F_RD"]]  # View specific plot
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Reshape data from wide to long format
+long_data2 <- Chemo_data_inhibit %>%
+  pivot_longer(
+    cols = starts_with("In_"),
+    names_to = "Cell_Type",
+    values_to = "Inhibition_Rate"
+  ) %>%
+  mutate(Cell_Type = gsub("In_", "", Cell_Type))
+
+long_data2
+```
+
+```{r}
+
+# Create the box plot
+
+# Basic high-resolution PNG
+png(filename = "Inhibition_rate_box.png",
+    width = 3000,
+    height = 2000,
+    res = 300,
+    units = "px")
+
+
+
+
+ggplot(long_data2, aes(x = Cell_Type, y = Inhibition_Rate, fill = Survival)) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(
+    title = "Inhibition Rate Comparison by Cell Type and Survival Status",
+    x = "Cell Type",
+    y = "Inhibition Rate",
+    fill = "Survival Status"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  scale_fill_manual(values = c("pCR" = "#3498db", "RD" = "#e74c3c"))+
+  theme(
+    text = element_text(size = 16, face = "bold"),        # Set font size and make it bold
+    axis.title = element_text(size = 16, face = "bold"), # Bold axis titles
+    axis.text = element_text(size = 16),                # Increase font size for axis text
+    legend.text = element_text(size = 16),              # Increase font size for legend
+    plot.title = element_text(size = 16, face = "bold") # Bold plot title
+  )
+
+dev.off()
+```
+
+```{r}
+
+stat.test3 <- long_data2 %>%
+  group_by(Cell_Type) %>%
+  wilcox_test(Inhibition_Rate ~ Survival) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_significance("p.adj")
+
+stat.test3
+```
+
+```{r}
+# Basic high-resolution PNG
+png(filename = "Inhibition_rate_box_with_stats.png",
+    width = 3000,
+    height = 2000,
+    res = 300,
+    units = "px")
+
+# Create a box plot
+bxp2 <- ggboxplot(
+  long_data2, x = "Cell_Type", y = "Inhibition_Rate", 
+  color = "Survival", palette = c("pCR" = "#3498db", "RD" = "#e74c3c")
+  )
+
+# Add p-values onto the box plots
+stat.test3 <- stat.test3 %>%
+  add_xy_position(x = "Cell_Type", dodge = 0.8)
+bxp2 + stat_pvalue_manual(
+  stat.test3,  label = "p", tip.length = 0
+  )
+
+# Add 10% spaces between the p-value labels and the plot border
+bxp2 + stat_pvalue_manual(
+  stat.test3,  label = "p", tip.length = 0, label.size = 6,   
+    fontface = "bold" 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  theme(
+    text = element_text(size = 16, face = "bold"),        # Set font size and make it bold
+    axis.title = element_text(size = 16, face = "bold"), # Bold axis titles
+    axis.text = element_text(size = 16),                # Increase font size for axis text
+    legend.text = element_text(size = 16),              # Increase font size for legend
+    plot.title = element_text(size = 16, face = "bold") # Bold plot title
+  )
+
+dev.off()
+```
+
+```{r}
+
+
+```
+
+```{r}
+# Additional statistical test
+stat.test4 <- long_data2 %>%
+  wilcox_test(Inhibition_Rate ~ Cell_Type, p.adjust.method = "bonferroni")
+stat.test4
+```
+
+```{r}
+stat.test3 <- stat.test3 %>%
+  add_xy_position(x = "Cell_Type", dodge = 0.8)
+bxp2.complex <- bxp2 + stat_pvalue_manual(
+  stat.test3,  label = "p", tip.length = 0,label.size = 4,   
+    fontface = "bold" 
+  )
+# 2. Add stat.test2
+
+
+
+
+
+# Add more space between brackets using `step.increase` 
+stat.test4 <- stat.test4 %>% add_xy_position(x = "Cell_Type")
+bxp2.complex <- bxp2.complex + 
+  stat_pvalue_manual(
+    stat.test4,  label = "p", tip.length = 0.02,
+    step.increase = 0.05,label.size = 4,   
+    fontface = "bold" 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))+
+  theme(
+    text = element_text(size = 16, face = "bold"),        # Set font size and make it bold
+    axis.title = element_text(size = 16, face = "bold"), # Bold axis titles
+    axis.text = element_text(size = 16),                # Increase font size for axis text
+    legend.text = element_text(size = 16),              # Increase font size for legend
+    plot.title = element_text(size = 16, face = "bold") # Bold plot title
+  )
+
+# 3. Display the plot
+bxp2.complex 
+
+
+```
+
+```{r}
+
+# Create the box plot
+ggplot(long_data2, aes(x = Patient, y = Inhibition_Rate, fill = Survival)) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(
+    title = "Growth Rate Comparison by Cell Type and Survival Status",
+    x = "Patient",
+    y = "Inhibition Rate",
+    fill = "Survival Status"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  scale_fill_manual(values = c("pCR" = "#3498db", "RD" = "#e74c3c"))
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### Classification
+
+```{r}
+
+# Load the data (update the file path accordingly)
+Chemo_data <- read_excel("saved_data/Chemo_model_for_box_plot.xlsx")
+
+Chemo_data
+```
+
+```{r}
+Chemo_data <-  Chemo_data[, !names(Chemo_data ) %in% c('Gr_F
+', 'In_EC', 'CC_Slope', 'Treg_Slope', 'Treg_ACF', 'Teff_Slope', 'Teff_AUC', 'M_Slope', 'EC_AUC', 'F_Slope')]
+```
+
+```{r}
+
+# Prepare the feature matrix for clustering
+features <- colnames(Chemo_data)[-c(1, ncol(Chemo_data))]
+```
+
+```{r}
+
+ # Normalize the features
+Chemo_data_fea <- Chemo_data[, features]
+Chemo_data_fea
+
+```
+
+```{r}
+
+```
+
+#### Logistic Regression for Classification
+
+```{r}
+
+# Prepare the data for logistic regression
+X <- Chemo_data_fea
+y <- ifelse(Chemo_data$Survival == "pCR", 1, 0)
+
+```
+
+```{r}
+
+loocv_control <- trainControl(
+   method = "LOOCV",
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE)
+```
+
+```{r}
+
+# Prepare data for caret
+train_data <- data.frame(X, Survival = factor(Chemo_data$Survival, levels = c("RD", "pCR")))
+
+```
+
+```{r}
+# Extract feature names from training data (excluding the target variable)
+features <- colnames(train_data)[colnames(train_data) != "Survival"]
+```
+
+```{r}
+
+# Compute class weights
+total_samples <- nrow(Chemo_data)
+class_counts <- table(Chemo_data$Survival)
+class_weights <- total_samples / class_counts
+
+# Assign weights based on class
+Chemo_data$weights <- sapply(Chemo_data$Survival, function(x) class_weights[x])
+
+```
+
+```{r}
+
+
+loocv_model <- train(
+  Survival ~ ., 
+  data = train_data,
+  method = "glmnet",
+  family = "binomial",
+  weights = Chemo_data$weights,
+  trControl = loocv_control,
+  metric = "ROC"
+)
+```
+
+```{r}
+# Print model summary
+print(loocv_model)
+
+```
+
+```{r}
+
+# Observed survival status
+observed <- loocv_model$pred$obs
+
+# Predicted probabilities for class "pCR"
+probabilities <- loocv_model$pred$pCR
+```
+
+```{r}
+# Compute ROC curve
+roc_curve <- roc(response = observed, predictor = probabilities)
+roc_curve
+```
+
+```{r}
+
+# Set up a high-resolution PNG device
+png(filename = "ROC_Curve_pCR_Prediction.png",
+    width = 5500,    # Width in pixels
+    height = 4000,   # Height in pixels
+    res = 900)  
+
+
+# Set custom parameters for larger, bold text
+par(cex.main = 1,      # Title size
+    cex.lab = 1.5,     # Axis labels size
+    cex.axis = 1.5,    # Axis numbers size
+    font.main = 2,     # Bold title (2 means bold)
+    font.lab = 1.5,      # Bold axis labels
+    font.axis = 1.5)     # Bold axis numbers
+
+# Plot ROC curve
+plot(roc_curve, 
+     main = "ROC Curve for pCR Prediction",
+     auc.main = TRUE,
+     color = TRUE,
+     print.auc = TRUE)
+
+
+dev.off()
+
+
+# Plot ROC curve
+plot(roc_curve, 
+     main = "ROC Curve for pCR Prediction",
+     auc.main = TRUE,
+     color = TRUE,
+     print.auc = TRUE)
+```
+
+```{r}
+# Confusion Matrix
+conf_matrix <- confusionMatrix(
+  loocv_model$pred$pred, 
+  loocv_model$pred$obs
+)
+print(conf_matrix)
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Extract feature names
+features <- loocv_model$finalModel$xNames
+
+# Extract coefficients at the optimal lambda
+coef_matrix <- coef(loocv_model$finalModel, s = loocv_model$finalModel$lambdaOpt)
+coef_values <- as.vector(coef_matrix[-1, 1])  # Exclude intercept
+
+# Create feature importance data frame with normalized importance
+feature_importance <- data.frame(
+  Feature = features,
+  Importance = abs(coef_values)
+)
+
+# Normalize importance to sum to 1
+feature_importance$Importance <- feature_importance$Importance / sum(feature_importance$Importance)
+
+# Sort by importance in descending order
+feature_importance <- feature_importance[order(-feature_importance$Importance), ]
+
+# Verify sum of importance is 1
+print(sum(feature_importance$Importance))
+
+# View result
+print(feature_importance)
+```
+
+```{r}
+
+
+# Set up a high-resolution PNG device
+png(filename = "Logistic_feature_importance.png",
+    width = 3000,    # Width in pixels
+    height = 5000,   # Height in pixels
+    res = 900)
+
+# Optional: Bar plot of feature importance
+library(ggplot2)
+
+# Subset to top 15 features based on Importance
+top_features <- feature_importance %>%
+  arrange(desc(Importance)) %>%
+  head(10)
+
+# Create the bar plot for the top 15 features
+feature_importance_plot <- ggplot(top_features, 
+                                  aes(x = reorder(Feature, Importance), 
+                                      y = Importance)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "",
+       x = "Features",
+       y = "Absolute Coefficient Value") +
+  theme(
+    text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12, face = "bold")
+  )
+
+# Print the plot
+print(feature_importance_plot)
+
+# Close the PNG device
+dev.off()
+
+```
+
+```{r}
+
+```
+
+#### Using PRC
+
+```{r}
+
+library(PRROC) # For Precision-Recall Curve AUC calculations
+
+# Custom summary function to compute PR AUC
+prcSummary <- function(data, lev = NULL, model = NULL) {
+  require(PRROC)
+  
+  # Check if predictions and probabilities are valid
+  if (is.null(data$obs) || is.null(data[, lev[2]])) return(c(PRC = NA))
+  
+  # Compute precision-recall curve
+  precision_recall <- pr.curve(scores.class0 = data[, lev[2]], weights.class0 = as.numeric(data$obs == lev[2]))
+  
+  # Return PRC (Area under Precision-Recall Curve)
+  c(PRC = precision_recall$auc.integral)
+}
+
+```
+
+```{r}
+
+# Update trainControl to use the new metric
+loocv_control2 <- trainControl(
+  method = "LOOCV",
+  summaryFunction = prcSummary,
+  classProbs = TRUE
+)
+```
+
+```{r}
+set.seed(12)
+loocv_model2 <- train(
+  Survival ~ ., 
+  data = train_data,
+  method = "glmnet",
+  family = "binomial",
+  weights = Chemo_data$weights,
+  trControl = loocv_control2,
+  metric = "PRC"
+)
+```
+
+```{r}
+
+# # Train the logistic regression model using PRC metric
+# set.seed(22)
+# loocv_model2 <- train(
+#   Survival ~ ., 
+#   data = train_data,
+#   method = "glmnet",
+#   family = "binomial",
+#   trControl = loocv_control2,
+#   metric = "PRC" # Use PRC as the performance metric
+# )
+# 
+
+```
+
+```{r}
+
+# Print the model summary
+print(loocv_model2)
+
+```
+
+```{r}
+
+# Observed survival status and predicted probabilities for "pCR"
+observed2 <- ifelse(loocv_model2$pred$obs == "pCR", 1, 0)
+probabilities2 <- loocv_model2$pred$pCR
+```
+
+```{r}
+
+# Compute the Precision-Recall Curve
+prc <- pr.curve(scores.class0 = probabilities2, weights.class0 = observed2, curve = TRUE)
+prc
+```
+
+```{r}
+
+# Set up a high-resolution PNG device
+png(filename = "PRC_Curve_pCR_Prediction.png",
+    width = 3000,    # Width in pixels
+    height = 2000,   # Height in pixels
+    res = 900)  
+
+
+# Set custom parameters for larger, bold text
+par(cex.main = 1,      # Title size
+    cex.lab = 1.5,     # Axis labels size
+    cex.axis = 1.5,    # Axis numbers size
+    font.main = 2,     # Bold title (2 means bold)
+    font.lab = 2,      # Bold axis labels
+    font.axis = 2)     # Bold axis numbers
+
+
+# Plot the Precision-Recall Curve
+plot(prc,
+     main = "Precision-Recall Curve for pCR Prediction",
+     auc.main = TRUE,
+     color = TRUE,
+     maxmin = FALSE)
+
+dev.off
+
+
+```
+
+```{r}
+
+plot(prc,
+     main = "Precision-Recall Curve for pCR Prediction",
+     auc.main = TRUE,
+     color = TRUE,
+     maxmin = FALSE)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+
+```
+
+```{r}
+# Load the data (update the file path accordingly)
+Chemo_data <- read_excel("saved_data/Chemo_model_for_box_plot.xlsx")
+
+Chemo_data
+```
+
+```{r}
+
+# Add these diagnostic checks after loading your data
+print(table(Chemo_data$Survival))  # Check class distribution
+print(sum(is.na(Chemo_data$Survival)))  # Check for NA values
+print(dim(Chemo_data))  # Check dimensions
+```
+
+#### Using XGBOOST
+
+```{r}
+
+library(xgboost)
+library(caret)
+library(tidyverse)
+library(pROC)
+library(parallel)
+library(doParallel)
+library(foreach)
+library(ROSE)
+library(dplyr)
+```
+
+```{r}
+set.seed(5)
+```
+
+```{r}
+
+
+# Data preprocessing function with validation
+preprocess_data <- function(data) {
+  # Check if data is empty
+  if (nrow(data) == 0) {
+    stop("Input data is empty")
+  }
+  
+  # Remove Patient ID column
+  if ("Patient" %in% names(data)) {
+    data$Patient <- NULL
+  }
+  
+  
+   # Convert categorical variables to numeric
+  categorical_cols <- sapply(data, is.character)
+  for (col in names(data)[categorical_cols]) {
+    if (col != "Survival") {  # Skip the target variable
+      data[[col]] <- as.numeric(as.factor(data[[col]]))
+    }
+  }
+  
+  # Convert target to numeric (0/1)
+  data$Survival <- as.numeric(data$Survival == "pCR")
+  
+  # Check class distribution
+  class_dist <- table(data$Survival)
+  if (length(class_dist) < 2) {
+    stop("Dataset contains only one class. Both positive and negative samples are required.")
+  }
+  
+  # Check for NA values
+  if (any(is.na(data))) {
+    stop("Dataset contains missing values")
+  }
+  
+  return(data)
+}
+```
+
+```{r}
+
+# Split data into features and target
+prepare_matrices <- function(data) {
+  # Convert to matrix format required by xgboost
+  features <- as.matrix(data[, !names(data) %in% c("Survival")])
+  target <- data$Survival
+  
+  return(list(features = features, target = target))
+}
+
+```
+
+```{r}
+
+# Custom evaluation metric for AUC
+eval_auc <- function(preds, dtrain) {
+  labels <- getinfo(dtrain, "label")
+  auc <- roc(labels, preds)$auc
+  return(list(metric = "auc", value = auc))
+}
+```
+
+```{r}
+# Parameter grid for tuning
+param_grid <- expand.grid(
+  max_depth = c(3, 4, 5, 6),
+  eta = c(0.01, 0.03, 0.05, 0.1),
+  subsample = c(0.7, 0.8, 0.9),
+  colsample_bytree = c(0.7, 0.8, 0.9),
+  min_child_weight = c(1, 3, 5),
+  gamma = c(0, 0.1, 0.3)
+)
+```
+
+```{r}
+# Cross-validation function
+cv_xgboost <- function(params, features, target, nfold = 5) {
+  dtrain <- xgb.DMatrix(features, label = target)
+  
+  tryCatch({
+    cv_results <- xgb.cv(
+      params = params,
+      data = dtrain,
+      nrounds = 1000,
+      nfold = nfold,
+      early_stopping_rounds = 50,
+      metrics = list("auc"),
+      verbose = 0,
+      stratified = TRUE,
+      prediction = TRUE
+    )
+    
+    # Get the best iteration's AUC
+    best_iter <- which.max(cv_results$evaluation_log$test_auc_mean)
+    return(list(
+      auc = cv_results$evaluation_log$test_auc_mean[best_iter],
+      nrounds = best_iter
+    ))
+    
+  }, error = function(e) {
+    warning(paste("CV failed with error:", e$message))
+    return(list(auc = NA, nrounds = NA))
+  })
+}
+
+```
+
+```{r}
+
+# Modified main modeling function
+train_optimal_model <- function(data) {
+  # Preprocess data with validation
+  processed_data <- preprocess_data(data)
+  prepared_data <- prepare_matrices(processed_data)
+  
+  # Print diagnostic information
+  cat("Data dimensions:", dim(processed_data), "\n")
+  cat("Class distribution:", table(processed_data$Survival), "\n")
+  
+  # Set basic parameters
+  base_params <- list(
+    objective = "binary:logistic",
+    eval_metric = "auc",
+    nthread = parallel::detectCores() - 1,
+    scale_pos_weight = sum(prepared_data$target == 0) / sum(prepared_data$target == 1)
+  )
+  
+  # Perform grid search with cross-validation
+  results <- data.frame()
+  
+  # Progress counter
+  total_combinations <- nrow(param_grid)
+  cat("Starting grid search with", total_combinations, "parameter combinations\n")
+  
+  for(i in 1:nrow(param_grid)) {
+    cat(sprintf("\rTesting combination %d/%d", i, total_combinations))
+    
+    params <- c(
+      base_params,
+      as.list(param_grid[i,])
+    )
+    
+    cv_result <- cv_xgboost(
+      params,
+      prepared_data$features,
+      prepared_data$target
+    )
+    
+    if (!is.na(cv_result$auc)) {
+      results <- rbind(results, 
+                      data.frame(param_grid[i,], 
+                                auc = cv_result$auc,
+                                nrounds = cv_result$nrounds))
+    }
+  }
+  
+  cat("\nGrid search completed.\n")
+  
+  # Check if we have any valid results
+  if (nrow(results) == 0) {
+    stop("No valid models could be trained with the given parameters")
+  }
+  
+  # Get best parameters
+  best_params <- results[which.max(results$auc), ]
+  cat("\nBest parameters found:\n")
+  print(best_params)
+  
+  # Train final model with best parameters
+  final_params <- c(
+    base_params,
+    as.list(best_params[1:6])
+  )
+  
+  dtrain <- xgb.DMatrix(prepared_data$features, 
+                        label = prepared_data$target)
+  
+  # Create watchlist for training
+  watchlist <- list(train = dtrain)
+  
+  final_model <- xgb.train(
+    params = final_params,
+    data = dtrain,
+    nrounds = best_params$nrounds,
+    early_stopping_rounds = 50,
+    watchlist = watchlist,
+    verbose = 0
+  )
+  
+  # Get feature importance
+  importance <- xgb.importance(
+    feature_names = colnames(prepared_data$features),
+    model = final_model
+  )
+  
+  return(list(
+    model = final_model,
+    best_params = best_params,
+    feature_importance = importance,
+    cv_results = results
+  ))
+}
+```
+
+```{r}
+results <- train_optimal_model(Chemo_data)
+```
+
+```{r}
+#View best parameters
+print(results$best_params)
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Ensure the data is in the correct format
+processed_data <- preprocess_data(Chemo_data)
+prepared_data <- prepare_matrices(processed_data)
+```
+
+```{r}
+# Convert features into an xgb.DMatrix
+dtest <- xgb.DMatrix(prepared_data$features)
+
+# Get predictions from the trained model
+predictions <- predict(results$model, dtest)
+
+```
+
+```{r}
+# Compute ROC curve and AUC
+roc_obj <- roc(prepared_data$target, predictions)
+auc_value <- auc(roc_obj)
+```
+
+```{r}
+
+```
+
+```{r}
+# Compute smoothed ROC curve
+roc_obj <- roc(prepared_data$target, predictions, smooth = TRUE)
+
+# Extract smoothed curve points
+roc_df <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+```
+
+```{r}
+
+
+# Plot smoothed ROC
+roc_plot <- ggplot(roc_df, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", linewidth = 1.5) +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(title = paste("ROC Curve (AUC =", round(auc(roc_obj), 3), ")"),
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal()  +
+  theme(
+    text = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+  )
+
+
+# Save the plot as a high-resolution PNG file
+ggsave("XGBOOST_ROC_CURVE_NEW.png", 
+       plot = roc_plot,
+       width = 5,      # Width in inches
+       height = 5,     # Height in inches
+       dpi = 900)      # Resolution in dots per inch
+```
+
+```{r}
+roc_plot 
+```
+
+#### New with C_I
+
+```{r}
+
+# Revised function to calculate ROC with confidence intervals
+calculate_roc_with_ci <- function(labels, predictions, ci_level = 0.95, n_bootstrap = 2000) {
+  # Compute smoothed ROC curve
+  roc_obj <- roc(labels, predictions, smooth = TRUE)
+  
+  # Extract smoothed ROC data
+  roc_data <- data.frame(FPR = 1 - roc_obj$specificities, 
+                         TPR = roc_obj$sensitivities)
+  
+  # Find optimal cutoff (Youden’s J by default)
+  opt_cut <- coords(roc_obj, "best", ret = c("threshold", "sensitivity", "specificity"), best.method = "youden")
+  
+  # Use bootstrap for CI
+  set.seed(42)
+  boot_auc <- numeric(n_bootstrap)
+  
+  indices_class1 <- which(labels == 1)
+  indices_class0 <- which(labels == 0)
+  
+  alpha <- (1 - ci_level) / 2
+  fixed_fpr_points <- seq(0, 1, length.out = 100)
+  tpr_at_fpr <- matrix(NA, nrow = n_bootstrap, ncol = length(fixed_fpr_points))
+  
+  for (i in 1:n_bootstrap) {
+    bootstrap_class1 <- sample(indices_class1, length(indices_class1), replace = TRUE)
+    bootstrap_class0 <- sample(indices_class0, length(indices_class0), replace = TRUE)
+    bootstrap_indices <- c(bootstrap_class1, bootstrap_class0)
+    
+    bootstrap_predictions <- predictions[bootstrap_indices]
+    bootstrap_labels <- labels[bootstrap_indices]
+    
+    boot_roc <- try(roc(bootstrap_labels, bootstrap_predictions), silent = TRUE)
+    
+    if (!inherits(boot_roc, "try-error")) {
+      boot_auc[i] <- auc(boot_roc)
+      interp_tpr <- approx(1 - boot_roc$specificities, boot_roc$sensitivities, 
+                           fixed_fpr_points, rule = 2)$y
+      tpr_at_fpr[i, ] <- interp_tpr
+    }
+  }
+  
+  ci_lower_tpr <- apply(tpr_at_fpr, 2, function(x) quantile(x, alpha, na.rm = TRUE))
+  ci_upper_tpr <- apply(tpr_at_fpr, 2, function(x) quantile(x, 1 - alpha, na.rm = TRUE))
+  
+  ci_lower <- data.frame(FPR = fixed_fpr_points, TPR = ci_lower_tpr)
+  ci_upper <- data.frame(FPR = fixed_fpr_points, TPR = ci_upper_tpr)
+  
+  auc_value <- auc(roc_obj)
+  auc_ci <- quantile(boot_auc, c(alpha, 1 - alpha), na.rm = TRUE)
+  
+  return(list(
+    roc_data = roc_data,
+    ci_lower = ci_lower,
+    ci_upper = ci_upper,
+    auc = auc_value,
+    auc_ci_lower = auc_ci[1],
+    auc_ci_upper = auc_ci[2],
+    optimal_cut = opt_cut
+  ))
+}
+```
+
+```{r}
+
+# Calculate confidence intervals for PR curve using bootstrap
+calculate_pr_with_ci <- function(labels, predictions, n_bootstrap = 2000, ci_level = 0.95) {
+  # Original PR curve
+  prc_obj <- pr.curve(scores.class0 = predictions, weights.class0 = labels, curve = TRUE)
+  
+  # Bootstrap for confidence intervals
+  precision_matrix <- matrix(nrow = n_bootstrap, ncol = length(prc_obj$curve[, 2]))
+  recall_levels <- prc_obj$curve[, 1]
+  
+  # Get indices for each class
+  indices_class1 <- which(labels == 1)
+  indices_class0 <- which(labels == 0)
+  
+  # Calculate quantiles for CI
+  alpha <- (1 - ci_level) / 2
+  
+  # Perform bootstrap
+  set.seed(42)  # For reproducibility
+  for (i in 1:n_bootstrap) {
+    # Resample with replacement from each class
+    bootstrap_class1 <- sample(indices_class1, length(indices_class1), replace = TRUE)
+    bootstrap_class0 <- sample(indices_class0, length(indices_class0), replace = TRUE)
+    
+    # Combine the resampled indices
+    bootstrap_indices <- c(bootstrap_class1, bootstrap_class0)
+    
+    # Get bootstrapped predictions and labels
+    bootstrap_predictions <- predictions[bootstrap_indices]
+    bootstrap_labels <- labels[bootstrap_indices]
+    
+    # Compute PR curve for this bootstrap sample
+    bootstrap_prc <- try(pr.curve(scores.class0 = bootstrap_predictions, 
+                                weights.class0 = bootstrap_labels, 
+                                curve = TRUE), silent = TRUE)
+    
+    if (!inherits(bootstrap_prc, "try-error") && length(bootstrap_prc$curve[, 1]) > 0) {
+      # Interpolate to get precision values at the original recall levels
+      precision_interp <- try(approx(bootstrap_prc$curve[, 1], bootstrap_prc$curve[, 2], 
+                                  recall_levels, rule = 2)$y, silent = TRUE)
+      
+      if (!inherits(precision_interp, "try-error")) {
+        precision_matrix[i, ] <- precision_interp
+      }
+    }
+  }
+  
+  # Calculate confidence intervals for each recall level
+  ci_lower <- apply(precision_matrix, 2, function(x) quantile(x, alpha, na.rm = TRUE))
+  ci_upper <- apply(precision_matrix, 2, function(x) quantile(x, 1 - alpha, na.rm = TRUE))
+  
+  # Calculate confidence interval for AUPRC
+  auprc_values <- numeric(n_bootstrap)
+  for (i in 1:n_bootstrap) {
+    bootstrap_class1 <- sample(indices_class1, length(indices_class1), replace = TRUE)
+    bootstrap_class0 <- sample(indices_class0, length(indices_class0), replace = TRUE)
+    bootstrap_indices <- c(bootstrap_class1, bootstrap_class0)
+    
+    bootstrap_predictions <- predictions[bootstrap_indices]
+    bootstrap_labels <- labels[bootstrap_indices]
+    
+    pr_result <- try(pr.curve(scores.class0 = bootstrap_predictions, 
+                            weights.class0 = bootstrap_labels, 
+                            curve = FALSE), silent = TRUE)
+    
+    if (!inherits(pr_result, "try-error")) {
+      auprc_values[i] <- pr_result$auc.integral
+    }
+  }
+  
+  auprc_ci <- quantile(auprc_values, c(alpha, 1 - alpha), na.rm = TRUE)
+  
+  return(list(
+    pr_data = data.frame(Recall = recall_levels, Precision = prc_obj$curve[, 2]),
+    ci_lower = data.frame(Recall = recall_levels, Precision = ci_lower),
+    ci_upper = data.frame(Recall = recall_levels, Precision = ci_upper),
+    auprc = prc_obj$auc.integral,
+    auprc_ci_lower = auprc_ci[1],
+    auprc_ci_upper = auprc_ci[2]
+  ))
+}
+```
+
+```{r}
+
+# Calculate ROC with confidence intervals
+roc_with_ci <- suppressMessages(suppressWarnings(calculate_roc_with_ci(prepared_data$target, predictions)))
+```
+
+```{r}
+# Extract optimal cutoff values safely and coerce to numeric
+opt_spec   <- as.numeric(roc_with_ci$optimal_cut[["specificity"]])
+opt_sens   <- as.numeric(roc_with_ci$optimal_cut[["sensitivity"]])
+opt_thresh <- as.numeric(roc_with_ci$optimal_cut[["threshold"]])
+
+# Enhanced ROC plot with smoothed curve + CI ribbon
+roc_plot <- ggplot() +
+  geom_ribbon(data = cbind(
+    FPR = roc_with_ci$ci_lower$FPR,
+    ymin = roc_with_ci$ci_lower$TPR,
+    ymax = roc_with_ci$ci_upper$TPR
+  ), aes(x = FPR, ymin = ymin, ymax = ymax), fill = "lightblue", alpha = 0.3) +
+  geom_line(data = roc_with_ci$roc_data, aes(x = FPR, y = TPR),
+            color = "blue", linewidth = 1.5) +
+  geom_abline(linetype = "dashed", color = "red") +
+  # Add optimal cutoff point
+  geom_point(aes(x = 1 - opt_spec, y = opt_sens),
+             color = "darkorange", size = 4, shape = 21, fill = "yellow") +
+  annotate("text",
+           x = 1 - opt_spec, y = opt_sens,
+           label = paste0(" ", round(opt_thresh, 3)),
+           vjust = -1, hjust = 1.1, size = 5, fontface = "bold", color = "black") +
+  labs(title = paste0("(AUC = ", round(roc_with_ci$auc, 3), 
+                      ", 95% CI: ", round(roc_with_ci$auc_ci_lower, 3), "-", 
+                      round(roc_with_ci$auc_ci_upper, 3), ")"),
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+  )
+
+
+# Save plot
+ggsave("Chemo_XGBOOST_ROC_CURVE_WITH_CI_AND_OPTIMAL.png",
+       plot = roc_plot, width = 8, height = 6, dpi = 900)
+
+roc_plot
+```
+
+```{r}
+
+# Calculate PR curve with confidence intervals
+pr_with_ci <- suppressMessages(suppressWarnings(calculate_pr_with_ci(processed_data$Survival, predictions)))
+
+```
+
+```{r}
+
+# Prepare PR curve data properly
+pr_data <- pr_with_ci$pr_data
+ci_lower <- pr_with_ci$ci_lower
+ci_upper <- pr_with_ci$ci_upper
+
+# Create enhanced Precision-Recall plot with confidence interval
+prc_plot <- ggplot() +
+  # Add confidence interval ribbon
+  geom_ribbon(data = data.frame(
+    Recall = ci_lower$Recall,
+    ymin = ci_lower$Precision,
+    ymax = ci_upper$Precision
+  ), aes(x = Recall, ymin = ymin, ymax = ymax),
+  fill = "lightgreen", alpha = 0.3) +
+  
+  # Add PR curve
+  geom_line(data = pr_data, aes(x = Recall, y = Precision),
+            color = "darkgreen", linewidth = 1.5) +
+  
+  labs(title = paste0("P-R Curve (AUPRC = ", round(pr_with_ci$auprc, 3),
+                     ", 95% CI: ", round(pr_with_ci$auprc_ci_lower, 3), "-",
+                     round(pr_with_ci$auprc_ci_upper, 3), ")"),
+       x = "Recall",
+       y = "Precision") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+  )
+
+# Save the enhanced PRC plot
+ggsave("Chemo_XGBOOST_PRC_CURVE_WITH_CI.png",
+       plot = prc_plot,
+       width = 8,
+       height = 6,
+       dpi = 500)
+
+
+
+prc_plot
+```
+
+```{r}
+
+```
+
+```{r}
+
+library(PRROC)
+# Ensure the predictions and actual labels are numeric
+predictions <- as.numeric(predictions)
+labels <- as.numeric(processed_data$Survival)
+
+# Compute PR curve
+prc_obj <- pr.curve(scores.class0 = predictions, weights.class0 = labels, curve = TRUE)
+
+# Print AUPRC score
+cat("AUPRC:", round(prc_obj$auc.integral, 3), "\n")
+```
+
+```{r}
+
+library(ggplot2)
+
+# Create the Precision-Recall plot with enhanced formatting
+prc_plot <- ggplot(data.frame(Recall = prc_obj$curve[, 1], 
+                             Precision = prc_obj$curve[, 2]), 
+                   aes(x = Recall, y = Precision)) +
+  geom_line(color = "darkgreen", linewidth = 1.5) +  
+  labs(title = paste("Precision-Recall Curve (AUPRC =", 
+                     round(prc_obj$auc.integral, 3), ")"),
+       x = "Recall",
+       y = "Precision") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+  )
+
+# Save the plot as a high-resolution PNG file
+ggsave("XGBOOST_PRC_CURVE_NEW.png", 
+       plot = prc_plot,
+       width = 8,     # Width in inches
+       height = 6,     # Height in inches
+       dpi = 500)      # Resolution in dots per inch
+```
+
+```{r}
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### Shapley Values
+
+```{r}
+
+# Required packages
+library(tidyverse)
+library(caret)
+library(xgboost)
+library(shapr)
+library(Matrix)
+library(fastshap)
+library(glmnet)
+```
+
+```{r}
+
+# Function to prepare data and create models
+prepare_and_train_models <- function(data, target_col, features, cor_threshold = 0.8) {
+  # Remove Patient ID if present
+  if ("Patient" %in% colnames(data)) {
+    data <- data[, !colnames(data) %in% "Patient"]
+  }
+  
+  # Convert target to numeric (0/1)
+  data[[target_col]] <- as.numeric(factor(data[[target_col]])) - 1
+  
+  # Validate data
+  if (any(is.na(data[[target_col]]))) {
+    stop("Target variable contains missing values")
+  }
+  if (any(is.na(data[features]))) {
+    warning("Features contain missing values. They will be handled in preprocessing.")
+  }
+  
+  # Split data into training and test sets
+  set.seed(42)
+  train_index <- createDataPartition(data[[target_col]], p = 0.75, list = FALSE)
+  train_data <- data[train_index, ]
+  test_data <- data[-train_index, ]
+  
+  # Initial scaling of all features
+  initial_preprocess <- preProcess(train_data[features], 
+                                 method = c("center", "scale", "medianImpute"))
+  train_data_scaled <- predict(initial_preprocess, train_data[features])
+  test_data_scaled <- predict(initial_preprocess, test_data[features])
+  
+  # Handle correlations
+  cor_matrix <- cor(train_data_scaled)
+  high_cor <- findCorrelation(cor_matrix, cutoff = cor_threshold)
+  
+  if(length(high_cor) > 0) {
+    message("Removing highly correlated features: ", 
+            paste(features[high_cor], collapse = ", "))
+    features_filtered <- features[-high_cor]
+  } else {
+    features_filtered <- features
+  }
+  
+  # Create new preprocess object with only filtered features
+  filtered_preprocess <- preProcess(train_data[features_filtered], 
+                                  method = c("center", "scale", "medianImpute"))
+  
+  # Scale data using filtered features
+  train_data_scaled <- predict(filtered_preprocess, train_data[features_filtered])
+  test_data_scaled <- predict(filtered_preprocess, test_data[features_filtered])
+  
+  # Train logistic regression
+  x_train <- as.matrix(train_data_scaled)
+  y_train <- train_data[[target_col]]
+  
+  cv_fit <- cv.glmnet(x_train, y_train, family = "binomial", 
+                      alpha = 0.5, nfolds = 5)
+  
+  logistic_model <- glmnet(x_train, y_train, family = "binomial",
+                          alpha = 0.5,
+                          lambda = cv_fit$lambda.min)
+  
+  # XGBoost preparation
+  dtrain <- xgb.DMatrix(data = x_train, label = y_train)
+  dtest <- xgb.DMatrix(data = as.matrix(test_data_scaled), 
+                       label = test_data[[target_col]])
+  
+  xgb_params <- list(
+    objective = "binary:logistic",
+    eval_metric = "logloss",
+    eta = 0.05,
+    max_depth = 3,
+    min_child_weight = 1,
+    subsample = 0.8,
+    colsample_bytree = 0.7,
+    scale_pos_weight = sum(y_train == 0) / sum(y_train == 1),
+    lambda = 2,
+    alpha = 1
+  )
+  
+  xgb_model <- xgb.train(
+    params = xgb_params,
+    data = dtrain,
+    nrounds = 150,
+    watchlist = list(train = dtrain, test = dtest),
+    early_stopping_rounds = 50,
+    verbose = 0
+  )
+  
+  return(list(
+    train_data = train_data,
+    test_data = test_data,
+    train_data_scaled = train_data_scaled,
+    test_data_scaled = test_data_scaled,
+    logistic_model = logistic_model,
+    xgb_model = xgb_model,
+    features = features_filtered,
+    filtered_preprocess = filtered_preprocess,
+    diagnostics = list(
+      lambda_min = cv_fit$lambda.min,
+      xgb_best_iteration = xgb_model$best_iteration
+    )
+  ))
+}
+```
+
+```{r}
+ 
+
+
+# Function to calculate Shapley values for Logistic
+
+
+calculate_logistic_shapley <- function(model_output, observation) {
+  # Get filtered features
+  features_filtered <- model_output$features
+  
+  # Ensure observation is a data frame and subset with filtered features
+  observation <- as.data.frame(observation)  # Convert to data frame
+  obs_filtered <- observation[, features_filtered, drop = FALSE]
+  
+  # Scale the observation using the filtered preprocess object
+  obs_scaled <- predict(model_output$filtered_preprocess, obs_filtered)
+  
+  # Create background data matrix
+  background_data <- as.matrix(model_output$train_data_scaled)
+  
+  # Define the prediction function
+  pred_function <- function(object, newdata) {
+    predict(
+      object, 
+      newx = as.matrix(newdata),  # Ensure newdata is a data frame
+      type = "response"
+    )
+  }
+  
+  # Calculate Shapley values using fastshap
+   shapley_values <- fastshap::explain(
+    object = model_output$logistic_model,  # Pass the model here
+    X = background_data,
+    newdata = as.matrix(obs_scaled),
+    pred_wrapper = pred_function,
+    nsim = 100
+  )
+
+  
+  # Format results
+   shapley_df <- as.data.frame(shapley_values)
+  names(shapley_df) <- features_filtered
+  
+  return(shapley_df)
+}
+```
+
+```{r}
+
+# Function to calculate Shapley values for XGBoost
+calculate_xgb_shapley <- function(model_output, observation) {
+  # Get filtered features
+  features_filtered <- model_output$features
+  
+  # Prepare observation
+  obs_scaled <- predict(model_output$filtered_preprocess,
+                        observation[features_filtered])
+  
+  # Define prediction wrapper for XGBoost
+  pred_wrapper <- function(object, newdata) {
+    predict(object, xgb.DMatrix(data = as.matrix(newdata)))
+  }
+  
+  # Calculate Shapley values
+  shapley_values <- fastshap::explain(
+    object = model_output$xgb_model,  # Pass model here
+    X = as.matrix(model_output$train_data_scaled),
+    newdata = as.matrix(obs_scaled),
+    pred_wrapper = pred_wrapper,
+    nsim = 100
+  )
+  
+  return(as.data.frame(shapley_values))
+}
+```
+
+```{r}
+
+plot_shapley_values <- function(shapley_values, model_type) {
+
+  suppressPackageStartupMessages({
+    library(dplyr)
+    library(tidyr)
+    library(ggplot2)
+  })
+
+  # Store original number of observations
+  original_rows <- nrow(shapley_values)
+
+  # Convert to long format
+  plot_data <- shapley_values %>%
+    tidyr::pivot_longer(cols = dplyr::everything(),
+                       names_to = "feature",
+                       values_to = "shapley_value")
+
+  # Aggregate if needed
+  if (original_rows > 1) {
+    plot_data <- plot_data %>%
+      group_by(feature) %>%
+      summarise(shapley_value = sum(shapley_value), .groups = "drop")
+    x_label <- "Sum of Shapley Values"
+  } else {
+    x_label <- "Shapley Value"
+  }
+
+  # Remove zero-valued features
+  plot_data <- plot_data %>% filter(shapley_value != 0)
+
+  # Round
+  plot_data <- plot_data %>% mutate(shapley_value = round(shapley_value, 2))
+
+  # Select top 5 positive & bottom 5 negative
+  top5_pos <- plot_data %>% arrange(desc(shapley_value)) %>% head(5)
+  bottom5_neg <- plot_data %>% arrange(shapley_value) %>% head(5)
+
+  final_plot_data <- bind_rows(top5_pos, bottom5_neg) %>%
+    mutate(
+      direction = ifelse(shapley_value >= 0, "Positive", "Negative"),
+      feature   = reorder(feature, shapley_value)
+    )
+
+  # Create horizontal bar plot (green for +, red for -)
+  ggplot(final_plot_data, aes(y = feature, x = shapley_value, fill = direction)) +
+    geom_col(width = 0.8) +
+    scale_fill_manual(values = c("Positive" = "forestgreen", "Negative" = "red3")) +
+    geom_text(
+      aes(label = sprintf("%.2f", shapley_value),
+          hjust = ifelse(shapley_value >= 0, -0.15, 1.15)),
+      size = 3.5,
+      color = "black"
+    ) +
+    scale_x_continuous(expand = expansion(mult = c(0.15, 0.15))) +
+    theme_minimal() +
+    labs(
+      title = paste("Top 5 Positive & Bottom 5 Negative Shapley Features -", model_type),
+      x = x_label,
+      y = "Features",
+      fill = NULL
+    ) +
+    theme(
+      axis.text.y = element_text(size = 10, face = "bold", color = "black",
+                                 margin = margin(r = 10)),
+      axis.text.x = element_text(size = 12, face = "bold", color = "black"),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5,
+                                margin = margin(b = 20)),
+      axis.title.x = element_text(size = 12, face = "bold", margin = margin(t = 15)),
+      axis.title.y = element_text(size = 12, face = "bold", margin = margin(r = 15)),
+      panel.grid.major.x = element_line(color = "gray90"),
+      panel.grid.minor.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      legend.position = "none"  # remove legend to match the example figure vibe
+    )
+}
+
+```
+
+##### Usage
+
+```{r}
+
+ # Train models
+  Shapley_models <- prepare_and_train_models(Chemo_data, "Survival", features)
+```
+
+```{r}
+# Check diagnostics
+print(Shapley_models$diagnostics)
+```
+
+```{r}
+
+```
+
+#### Feature Importance
+
+```{r}
+
+```
+
+```{r}
+#logistic Regression
+
+set.seed(25)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, Chemo_data)
+logistic_shapley
+```
+
+```{r}
+
+#XGBoost
+
+set.seed(25)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, Chemo_data)
+xgb_shapley
+
+```
+
+```{r}
+
+```
+
+#### Plot
+
+```{r}
+
+png("Shapley_Logistic_All_Patients.png", width = 4500, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression all patients")
+dev.off()
+
+plot_shapley_values(logistic_shapley, "Logistic Regression all patients")
+```
+
+```{r}
+
+
+png("Shapley_XGBOOST_All_Patients.png", width = 4500, height = 3500, res = 900)
+par(cex.main = 1, cex.lab = 1, cex.axis = 0.7, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(xgb_shapley, "")
+dev.off()
+# Plot results
+plot_shapley_values(xgb_shapley, "")
+```
+
+```{r}
+
+```
+
+#### pCR Patients
+
+```{r}
+
+```
+
+#### Patient N022
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation <- Chemo_data[4, ]  
+observation
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation)
+xgb_shapley
+
+```
+
+```{r}
+
+png("Shapley_Logistic_N022.png", width = 4500, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N022")
+dev.off()
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N022")
+```
+
+```{r}
+
+
+png("Shapley_XGBOOST_N022.png", width = 4500, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N022")
+dev.off()
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N022")
+```
+
+```{r}
+
+
+```
+
+#### Patient N023
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation2 <- Chemo_data[5, ]  
+observation2
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation2)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation2)
+xgb_shapley
+
+```
+
+```{r}
+
+png("Shapley_Logistic_N023.png", width = 4500, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N023")
+
+dev.off()
+
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N023")
+```
+
+```{r}
+
+png("Shapley_XGBOOST_N023.png",width = 4500, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N023")
+
+dev.off()
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N023")
+```
+
+```{r}
+
+```
+
+#### Patient N113
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation2 <- Chemo_data[31, ]  
+observation2
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation2)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation2)
+xgb_shapley
+
+```
+
+```{r}
+
+png("Shapley_Logistic_N113.png", width = 4000, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N113")
+
+dev.off()
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N113")
+```
+
+```{r}
+
+png("Shapley_XGBOOST_N113.png", width = 4500, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N113")
+
+dev.off()
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N113")
+```
+
+```{r}
+
+```
+
+#### Patient N152
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation3 <- Chemo_data[37, ]  
+observation3
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation3)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation3)
+xgb_shapley
+
+```
+
+```{r}
+
+png("Shapley_Logistic_N152.png", width = 4000, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N152")
+
+dev.off()
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N152")
+```
+
+```{r}
+
+
+png("Shapley_XGBOOST_N152.png", width = 4500, height = 3200, res = 900)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N152")
+
+dev.off()
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N152")
+```
+
+```{r}
+
+```
+
+#### Patient N184
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation4 <- Chemo_data[44, ]  
+observation4
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation4)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation4)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N184")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N184")
+```
+
+```{r}
+
+```
+
+#### Patient N187
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation5 <- Chemo_data[45, ]  
+observation5
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation5)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation5)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N187")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N187")
+```
+
+```{r}
+
+```
+
+#### Patient N197
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation6 <- Chemo_data[52, ]  
+observation6
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation6)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation6)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N197")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N197")
+```
+
+```{r}
+
+```
+
+#### Patient N242
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation7 <- Chemo_data[59, ]  
+observation7
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation7)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation7)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N242")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N242")
+```
+
+```{r}
+
+```
+
+#### Patient N252
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation8 <- Chemo_data[66, ]  
+observation8
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation8)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation8)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N252")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N252")
+```
+
+```{r}
+
+
+```
+
+#### Patient N260
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation9 <- Chemo_data[68, ]  
+observation9
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation9)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation9)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N260")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N260")
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### RD Patients
+
+```{r}
+
+```
+
+#### Patient N040
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation_imm <- Chemo_data[9, ]  
+observation_imm
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation_imm)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation_imm)
+xgb_shapley
+
+```
+
+```{r}
+
+png("Shapley_Logistic_N040.png", width = 4000, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N040")
+
+dev.off()
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N040")
+```
+
+```{r}
+png("Shapley_XGBOOST_N040.png", width = 4500, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N040")
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N040")
+```
+
+```{r}
+
+```
+
+```         
+```
+
+#### Patient N069
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation_imm1 <- Chemo_data[16, ]  
+observation_imm1
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation_imm1)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation_imm1)
+xgb_shapley
+
+```
+
+```{r}
+
+png("Shapley_Logistic_N069.png", width = 4000, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N069")
+
+dev.off()
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N069")
+```
+
+```{r}
+
+
+png("Shapley_XGBOOST_N069.png", width = 4500, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N069")
+
+dev.off()
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N069")
+```
+
+```{r}
+
+```
+
+#### Patient N074
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation_imm2 <- Chemo_data[19, ]  
+observation_imm2
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation_imm2)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation_imm2)
+xgb_shapley
+
+```
+
+```{r}
+
+png("Shapley_Logistic_N074.png", width = 4000, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N074")
+
+dev.off()
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N074")
+```
+
+```{r}
+
+
+png("Shapley_XGBOOST_N074.png", width = 4500, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N074")
+dev.off()
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N074")
+```
+
+```{r}
+
+```
+
+#### Patient N099
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation_imm3 <- Chemo_data[27, ]  
+observation_imm3
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation_imm3)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation_imm3)
+xgb_shapley
+
+```
+
+```{r}
+
+
+png("Shapley_Logistic_N099.png", width = 4000, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N099")
+
+dev.off()
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N099")
+```
+
+```{r}
+
+
+png("Shapley_XGBOOST_N099.png", width = 4500, height = 3200, res = 500)
+par(cex.main = 1, cex.lab = 1, cex.axis = 1, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N099")
+
+dev.off()
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N099")
+```
+
+```{r}
+
+```
+
+#### Patient N127
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation_imm4 <- Chemo_data[34, ]  
+observation_imm4
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation_imm4)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation_imm4)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N127")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N127")
+```
+
+```{r}
+
+```
+
+#### Patient N172
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation_imm5 <- Chemo_data[42, ]  
+observation_imm5
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation_imm5)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation_imm5)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N172")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N172")
+```
+
+```{r}
+
+```
+
+#### Patient N178
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation_imm6 <- Chemo_data[43, ]  
+observation_imm6
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation_imm6)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation_imm6)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N178")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N178")
+```
+
+```{r}
+
+```
+
+#### Patient N193
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation_imm7 <- Chemo_data[50, ]  
+observation_imm7
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation_imm7)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation_imm7)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N193")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N193")
+```
+
+```{r}
+
+```
+
+#### Patient N248
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation_imm8 <- Chemo_data[63, ]  
+observation_imm8
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation_imm8)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation_imm8)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N248")
+```
+
+```{r}
+
+png("Shapley_XGBOOST_N248.png", width = 4500, height = 3200, res = 900)
+par(cex.main = 1, cex.lab = 1, cex.axis = 0.7, font.main = 1, font.lab = 1)
+# Plot results
+plot_shapley_values(xgb_shapley, "")
+dev.off()
+# Plot results
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N248")
+```
+
+```{r}
+
+```
+
+#### Patient N172
+
+```{r}
+# Calculate Shapley values for a specific observation
+observation_imm5 <- Chemo_data[42, ]  
+observation_imm5
+```
+
+```{r}
+set.seed(21)
+logistic_shapley <- calculate_logistic_shapley(Shapley_models, observation_imm5)
+print(logistic_shapley)
+```
+
+```{r}
+
+set.seed(21)
+xgb_shapley <- calculate_xgb_shapley(Shapley_models, observation_imm5)
+xgb_shapley
+
+```
+
+```{r}
+# Plot results
+plot_shapley_values(logistic_shapley, "Logistic Regression Patient N172")
+```
+
+```{r}
+
+# Plot results
+plot_shapley_values(xgb_shapley, "XGBoost Patient N172")
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

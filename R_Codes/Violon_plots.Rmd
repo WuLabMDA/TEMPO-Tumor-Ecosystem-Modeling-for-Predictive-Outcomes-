@@ -1,0 +1,671 @@
+---
+title: "R Notebook"
+output: html_notebook
+Author: Daniel Marri
+Task: Test_analysis of parameters differences 
+---
+
+```{r}
+setwd('V:/dkmarri/Breast_Cancer_IMC_Data/R_Codes')
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(cluster)
+library(factoextra)
+library(caret)
+library(pROC)
+library(glmnet)
+library(reshape2)
+library(tidyr)
+library(readxl)
+library(ggrepel)
+library(patchwork)
+library(scales)
+
+```
+
+```{r}
+
+Chemo_data <- read_excel("saved_data/Chemo_model_for_box_plot_New.xlsx")
+
+Chemo_data
+```
+
+```{r}
+
+```
+
+```{r}
+
+Chemo_immu_data <- read_excel("saved_data/Chemo_immuno__model_for_box_plot_New.xlsx")
+
+Chemo_immu_data
+```
+
+```{r}
+
+
+###############################################
+# FIND MATCHING GROWTH (Gr_) AND INHIBITION (In_) COLUMNS
+###############################################
+gr_cols_chemo <- grep("^Gr_", names(Chemo_data), value = TRUE)
+gr_cols_immu  <- grep("^Gr_", names(Chemo_immu_data), value = TRUE)
+
+in_cols_chemo <- grep("^In_", names(Chemo_data), value = TRUE)
+in_cols_immu  <- grep("^In_", names(Chemo_immu_data), value = TRUE)
+
+# Find intersecting names (columns present in both datasets)
+matched_gr <- intersect(gr_cols_chemo, gr_cols_immu)
+matched_in <- intersect(in_cols_chemo, in_cols_immu)
+```
+
+```{r}
+
+###############################################
+# FUNCTION TO GENERATE VIOLIN PLOT + STATS
+###############################################
+plot_violin_and_test <- function(var_name) {
+  
+  df <- data.frame(
+    Parameter = c(Chemo_data[[var_name]], Chemo_immu_data[[var_name]]),
+    Treatment = rep(c("C", "C&I"),
+                times = c(nrow(Chemo_data), nrow(Chemo_immu_data)))
+  )
+  
+  # Determine test automatically based on normality
+  if (shapiro.test(df$Parameter[df$Treatment=="C"])$p.value > 0.05 &&
+      shapiro.test(df$Parameter[df$Treatment=="C&I"])$p.value > 0.05) {
+    stat_test <- t.test(Parameter ~ Treatment, data = df)
+    test_used <- "t-test"
+  } else {
+    stat_test <- wilcox.test(Parameter ~ Treatment, data = df)
+    test_used <- "Wilcoxon"
+  }
+
+  pval <- stat_test$p.value
+  p_label <- ifelse(pval < 0.001, "***",
+                    ifelse(pval < 0.01, "**",
+                           ifelse(pval < 0.05, "*", "ns")))
+  
+  p_title <- paste0(var_name, " (p-value = ",
+                    signif(pval, 2), ")")
+  
+  g <- ggplot(df, aes(x = Treatment, y = Parameter, fill = Treatment)) +
+    geom_violin(trim = FALSE) +
+    geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white") +
+    ggtitle(p_title) +
+    annotate("text", x = 1.5, y = max(df$Parameter, na.rm = TRUE),
+             label = p_label, size = 8) +
+    theme_minimal(base_size = 14) +
+    theme(
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.ticks = element_line(color = "black"),
+    axis.text.x = element_text(
+      angle = 0, vjust = 1, hjust = 1, size = 12, face = "bold", color = "black"
+    ),
+    axis.text.y = element_text(size = 10, face = "bold", color = "black"),
+    axis.title.x = element_text(size = 12, face = "bold", color = "black"),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+    panel.border = element_blank(),
+    panel.grid = element_blank()
+  ) 
+  
+  return(g)
+}
+```
+
+```{r}
+###############################################
+# MAKE OUTPUT FOLDER
+###############################################
+if (!dir.exists("violin_plots")) dir.create("violin_plots")
+```
+
+```{r}
+library(purrr)
+###############################################
+# GENERATE ALL GROWTH RATE PLOTS
+###############################################
+gr_plots <- map(matched_gr, function(v) {
+  g <- plot_violin_and_test(v)
+  ggsave(filename = paste0("violin_plots/", v, "_violin.png"),
+         plot = g, width = 3, height = 2, dpi = 600)
+  print(g)
+})
+```
+
+```{r}
+
+###############################################
+# GENERATE ALL INHIBITION RATE PLOTS
+###############################################
+in_plots <- map(matched_in, function(v) {
+  g <- plot_violin_and_test(v)
+  ggsave(filename = paste0("violin_plots/", v, "_violin.png"),
+         plot = g, width = 3, height = 2, dpi = 600)
+  print(g)
+})
+```
+
+```{r}
+```
+
+```{r}
+```
+
+#### Plot Violin Stratifies comparisons by **Survival status** (`pCR` vs `RD`)
+
+```{r}
+
+###############################################
+# ENSURE SURVIVAL COLUMN IS FACTOR
+###############################################
+Chemo_data$Survival <- factor(Chemo_data$Survival, levels = c("pCR", "RD"))
+Chemo_immu_data$Survival <- factor(Chemo_immu_data$Survival, levels = c("pCR", "RD"))
+
+```
+
+```{r}
+
+###############################################
+# IDENTIFY MATCHED Gr_ AND In_ VARIABLES
+###############################################
+gr_vars <- intersect(
+  grep("^Gr_", names(Chemo_data), value = TRUE),
+  grep("^Gr_", names(Chemo_immu_data), value = TRUE)
+)
+
+in_vars <- intersect(
+  grep("^In_", names(Chemo_data), value = TRUE),
+  grep("^In_", names(Chemo_immu_data), value = TRUE)
+)
+
+all_vars <- c(gr_vars, in_vars)
+
+```
+
+```{r}
+
+plot_violin_stratified <- function(var_name) {
+
+  df <- bind_rows(
+    Chemo_data %>%
+      dplyr::select(Survival, value = all_of(var_name)) %>%
+      mutate(Treatment = "C"),
+    
+    Chemo_immu_data %>%
+      dplyr::select(Survival, value = all_of(var_name)) %>%
+      mutate(Treatment = "C&I")
+  ) %>%
+    filter(!is.na(value))
+  ###############################################
+  # STATISTICAL TEST PER STRATUM
+  ###############################################
+  stat_results <- df %>%
+    group_by(Survival) %>%
+    summarise(
+      p_norm_chemo =
+        shapiro.test(value[Treatment == "C"])$p.value,
+      p_norm_immu =
+        shapiro.test(value[Treatment == "C&I"])$p.value,
+      test_used = ifelse(
+        p_norm_chemo > 0.05 & p_norm_immu > 0.05,
+        "t-test",
+        "Wilcoxon"
+      ),
+      p_value = ifelse(
+        test_used == "t-test",
+        t.test(value ~ Treatment)$p.value,
+        wilcox.test(value ~ Treatment, exact = FALSE)$p.value
+      ),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      label = case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01  ~ "**",
+        p_value < 0.05  ~ "*",
+        TRUE ~ "ns"
+      )
+    )
+
+  ###############################################
+  # CREATE VIOLIN PLOT
+  ###############################################
+  ggplot(df, aes(x = Treatment, y = value, fill = Treatment)) +
+    geom_violin(trim = FALSE) +
+    geom_boxplot(width = 0.15, fill = "white", outlier.shape = NA) +
+    facet_wrap(~ Survival, scales = "free_y") +
+    geom_text(
+      data = stat_results,
+      aes(
+        x = 1.5,
+        y = max(df$value, na.rm = TRUE),
+        label = label
+      ),
+      inherit.aes = FALSE,
+      size = 4
+    ) +
+    labs(
+      title = paste0(var_name, ": C vs C&I"),
+      y = var_name,
+      x = NULL
+    ) +
+    guides(fill = "none") +                # <-- removes fill legend
+    theme_minimal(base_size = 14) +
+    theme(
+      legend.position = "none",            # <-- removes legend entirely
+      axis.line = element_line(color = "black", linewidth = 0.6),
+      axis.ticks = element_line(color = "black"),
+      axis.text.x = element_text(
+        angle = 0, vjust = 1, hjust = 1, size = 12, face = "bold", color = "black"
+      ),
+      axis.text.y = element_text(size = 10, face = "bold", color = "black"),
+      axis.title.x = element_text(size = 12, face = "bold", color = "black"),
+      axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+      panel.border = element_blank(),
+      panel.grid = element_blank()
+    )
+}
+
+```
+
+```{r}
+
+###############################################
+# GENERATE ALL PLOTS
+###############################################
+plots <- map(all_vars, function(v) {
+  p <- plot_violin_stratified(v)
+  ggsave(
+    filename = paste0("violin_plots/", v, "_stratified_violin.png"),
+    plot = p,
+    width = 3,
+    height = 2,
+    dpi = 600
+  )
+  print(p)
+})
+
+```
+
+```{r}
+```
+
+#### Using Volcano plot
+
+```{r}
+
+# ------------------------------------------------------------
+# 1) Load data
+# ------------------------------------------------------------
+Chemo_data <- read_excel("saved_data/Chemo_model_for_box_plot_New.xlsx")
+Chemo_immu_data <- read_excel("saved_data/Chemo_immuno__model_for_box_plot_New.xlsx")
+
+
+```
+
+```{r}
+# ------------------------------------------------------------
+# 2) Add labels
+# ------------------------------------------------------------
+Chemo_data <- Chemo_data %>%
+  mutate(
+    Survival  = factor(Survival, levels = c("pCR", "RD")),
+    Treatment = "Chemo"
+  )
+
+Chemo_immu_data <- Chemo_immu_data %>%
+  mutate(
+    Survival  = factor(Survival, levels = c("pCR", "RD")),
+    Treatment = "Chemo-IO"
+  )
+
+```
+
+```{r}
+# ------------------------------------------------------------
+# 3) Get numeric parameter columns
+# ------------------------------------------------------------
+id_cols <- c("Patient", "Survival", "Treatment")
+
+get_param_cols <- function(df, id_cols) {
+  num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+  setdiff(num_cols, id_cols)
+}
+
+param_cols_chemo <- get_param_cols(Chemo_data, id_cols)
+param_cols_io    <- get_param_cols(Chemo_immu_data, id_cols)
+all_vars <- union(param_cols_chemo, param_cols_io)
+
+if (length(all_vars) == 0) stop("No numeric parameter columns found.")
+
+add_missing_cols <- function(df, cols) {
+  miss <- setdiff(cols, names(df))
+  if (length(miss) > 0) df[miss] <- NA_real_
+  df
+}
+
+Chemo_data      <- add_missing_cols(Chemo_data, all_vars)
+Chemo_immu_data <- add_missing_cols(Chemo_immu_data, all_vars)
+
+```
+
+```{r}
+# ------------------------------------------------------------
+# 4) Long format
+# ------------------------------------------------------------
+combined <- bind_rows(Chemo_data, Chemo_immu_data)
+
+long_df <- combined %>%
+  dplyr::select(Survival, Treatment, all_of(all_vars)) %>%
+  pivot_longer(
+    cols = all_of(all_vars),
+    names_to = "Parameter",
+    values_to = "Value"
+  ) %>%
+  filter(!is.na(Value), is.finite(Value))
+
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 5) Helper functions
+# ------------------------------------------------------------
+safe_shapiro_p <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) < 3) return(NA_real_)
+  if (length(unique(x)) < 3) return(NA_real_)
+  tryCatch(shapiro.test(x)$p.value, error = function(e) NA_real_)
+}
+
+classify_parameter <- function(x) {
+  case_when(
+    grepl("^Gr_", x, ignore.case = TRUE) ~ "Growth rate",
+    grepl("^In_", x, ignore.case = TRUE) ~ "Inhibition rate",
+    grepl("^(Slope_|intercept_|TIS_|TGR_|TDS_)", x, ignore.case = TRUE) ~ "Dynamic feature",
+    TRUE ~ "Other"
+  )
+}
+
+compute_volcano_stats_pCR_vs_RD <- function(df_treat) {
+  df_treat %>%
+    group_by(Parameter) %>%
+    summarise(
+      n_pCR = sum(Survival == "pCR"),
+      n_RD  = sum(Survival == "RD"),
+
+      mean_pCR = mean(Value[Survival == "pCR"], na.rm = TRUE),
+      mean_RD  = mean(Value[Survival == "RD"],  na.rm = TRUE),
+
+      min_all = min(Value, na.rm = TRUE),
+      offset  = ifelse(min_all <= 0, abs(min_all) + 1, 0),
+
+      # positive log2FC means higher in pCR
+      log2FC = log2((mean_pCR + offset + 1e-6) / (mean_RD + offset + 1e-6)),
+
+      p_norm_pCR = safe_shapiro_p(Value[Survival == "pCR"]),
+      p_norm_RD  = safe_shapiro_p(Value[Survival == "RD"]),
+
+      test_used = case_when(
+        !is.na(p_norm_pCR) & !is.na(p_norm_RD) &
+          p_norm_pCR > 0.05 & p_norm_RD > 0.05 ~ "t-test",
+        TRUE ~ "Wilcoxon"
+      ),
+
+      p_value = case_when(
+        n_pCR < 2 | n_RD < 2 ~ NA_real_,
+        test_used == "t-test" ~ tryCatch(t.test(Value ~ Survival)$p.value, error = function(e) NA_real_),
+        TRUE ~ tryCatch(wilcox.test(Value ~ Survival, exact = FALSE)$p.value, error = function(e) NA_real_)
+      ),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      FDR = p.adjust(p_value, method = "BH"),
+      FDR_plot = pmax(FDR, 1e-300),
+      negLog10FDR = -log10(FDR_plot),
+      class = classify_parameter(Parameter)
+    )
+}
+
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 6) Compute volcano stats WITHIN each treatment arm
+# ------------------------------------------------------------
+volcano_stats <- long_df %>%
+  group_by(Treatment) %>%
+  group_modify(~ compute_volcano_stats_pCR_vs_RD(.x)) %>%
+  ungroup()
+
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 7) Significance cutoffs
+# ------------------------------------------------------------
+alpha_fdr <- 0.10
+fc_cut <- log2(0.11)
+
+volcano_stats <- volcano_stats %>%
+  mutate(
+    is_sig = !is.na(FDR) & FDR < alpha_fdr & abs(log2FC) >= fc_cut,
+    plot_class = ifelse(is_sig, class, "Not significant")
+  )
+
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 8) Common axis limits for direct comparison
+# ------------------------------------------------------------
+plot_df_all <- volcano_stats %>%
+  filter(is.finite(log2FC), is.finite(negLog10FDR))
+
+x_lim <- max(abs(plot_df_all$log2FC), na.rm = TRUE)
+x_lim <- max(x_lim, fc_cut) * 1.15
+
+y_lim <- max(plot_df_all$negLog10FDR, na.rm = TRUE)
+y_lim <- max(y_lim, -log10(alpha_fdr)) * 1.10
+
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 9) High-impact plot function
+# ------------------------------------------------------------
+plot_volcano_highimpact <- function(stats_df, title = NULL, subtitle = NULL, label_top_n = 15) {
+
+  plot_df <- stats_df %>%
+    dplyr::filter(is.finite(log2FC), is.finite(negLog10FDR))
+
+  lab_df <- plot_df %>%
+    dplyr::filter(is_sig) %>%
+    dplyr::arrange(FDR, dplyr::desc(abs(log2FC))) %>%
+    dplyr::slice_head(n = label_top_n)
+
+  # add a little extra top room for the corner annotations
+  y_lim_use <- y_lim * 1.08
+
+  # place labels slightly inward from panel edges
+  x_annot <- x_lim * 0.97
+  y_annot <- y_lim_use * 0.95
+
+  ggplot(plot_df, aes(x = log2FC, y = negLog10FDR)) +
+    geom_hline(
+      yintercept = -log10(alpha_fdr),
+      linetype = "dashed",
+      linewidth = 0.5,
+      color = "black"
+    ) +
+    geom_vline(
+      xintercept = c(-fc_cut, fc_cut),
+      linetype = "dashed",
+      linewidth = 0.5,
+      color = "black"
+    ) +
+    geom_point(
+      aes(color = plot_class),
+      size = 2.8,
+      alpha = 0.9
+    ) +
+    ggrepel::geom_text_repel(
+      data = lab_df,
+      aes(label = Parameter, color = class),
+      size = 3.3,
+      box.padding = 0.35,
+      point.padding = 0.2,
+      segment.alpha = 0.5,
+      segment.size = 0.3,
+      max.overlaps = Inf,
+      show.legend = FALSE
+    ) +
+    annotate(
+      "text",
+      x = x_annot,
+      y = y_annot,
+      label = "Higher in pCR",
+      hjust = 1,
+      vjust = 1,
+      size = 3.8,
+      fontface = "bold"
+    ) +
+    annotate(
+      "text",
+      x = -x_annot,
+      y = y_annot,
+      label = "Higher in RD",
+      hjust = 0,
+      vjust = 1,
+      size = 3.8,
+      fontface = "bold"
+    ) +
+    scale_color_manual(
+      values = c(
+        "Growth rate"     = "green3",
+        "Inhibition rate" = "red3",
+        "Dynamic feature" = "blue3",
+        "Not significant" = "grey70"
+      ),
+      breaks = c("Growth rate", "Inhibition rate", "Dynamic feature"),
+      name = "Parameter class"
+    ) +
+    coord_cartesian(
+      xlim = c(-x_lim, x_lim),
+      ylim = c(0, y_lim_use),
+      clip = "off"
+    ) +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = expression(log[2]~fold~change~"(pCR / RD)"),
+      y = expression(-log[10]~"(FDR)")
+    ) +
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5),
+      axis.title = element_text(face = "bold", size = 12),
+      axis.text = element_text(color = "black", size = 10),
+      axis.line = element_line(linewidth = 0.6, color = "black"),
+      axis.ticks = element_line(linewidth = 0.5, color = "black"),
+      legend.position = "right",
+      legend.title = element_text(face = "bold"),
+      legend.text = element_text(size = 10)
+    )
+}
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 10) Generate the TWO correct volcano plots
+# ------------------------------------------------------------
+p_chemo <- volcano_stats %>%
+  filter(Treatment == "Chemo") %>%
+  plot_volcano_highimpact(
+    title = "Chemotherapy",
+    subtitle = "pCR vs RD",
+    label_top_n = 15
+  )
+
+p_chemo_io <- volcano_stats %>%
+  filter(Treatment == "Chemo-IO") %>%
+  plot_volcano_highimpact(
+    title = "Chemo-immunotherapy",
+    subtitle = "pCR vs RD",
+    label_top_n = 15
+  )
+```
+
+```{r}
+p_chemo
+```
+
+```{r}
+
+p_chemo_io
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 11) Save
+# ------------------------------------------------------------
+outdir <- "volcano_plots_within_treatment_pCR_vs_RD"
+if (!dir.exists(outdir)) dir.create(outdir)
+
+ggsave(
+  file.path(outdir, "volcano_Chemo_pCR_vs_RD.png"),
+  plot = p_chemo,
+  width = 6.2, height = 4.8, dpi = 1200, bg = "white"
+)
+
+ggsave(
+  file.path(outdir, "volcano_ChemoIO_pCR_vs_RD.png"),
+  plot = p_chemo_io,
+  width = 6.2, height = 4.8, dpi = 1200, bg = "white"
+)
+
+print(p_chemo)
+print(p_chemo_io)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

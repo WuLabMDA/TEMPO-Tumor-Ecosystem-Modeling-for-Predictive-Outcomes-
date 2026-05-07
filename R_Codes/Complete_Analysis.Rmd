@@ -1,0 +1,3803 @@
+---
+title: "R Notebook"
+output: html_notebook
+Author: Daniel Marri
+Task: New_Analysis
+---
+
+```{r}
+
+setwd('V:/dkmarri/Breast_Cancer_IMC_Data/R_Codes')
+```
+
+```{r}
+
+library(imcRtools)
+library(cytomapper)
+library(tidyverse)
+library(EBImage)
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(dplyr)
+library(future)
+library(progress)
+library(Matrix)
+library(RANN)
+library(reticulate)
+library(igraph)
+library(tidyr)
+library(dittoSeq)
+library(scater)
+library(patchwork)
+library(cowplot)
+library(viridis)
+library(parallel) 
+library(spdep)
+library(spatialHeatmap)
+library(igraph)
+library(RANN)
+library(data.table)
+library(Matrix)
+library(parallel)
+library(furrr)
+library(scran)
+library(batchelor)
+library(BiocParallel)
+library(scater)  # For PCA, if not already installed
+library(SummarizedExperiment)
+library(sva)
+library(harmony)
+library(RColorBrewer)
+library(BiocSingular)
+library(scales)
+library(ggraph)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+```{r}
+
+spe <- readRDS("saved_data/spatial.rds")
+spe
+```
+
+```{r}
+
+# Subsetting based on the column 'Arm' Chemotherapy
+
+spe_chemotherapy <- spe[, colData(spe)$Arm == "C"]
+
+```
+
+```{r}
+# Subsetting based on the column 'Arm' Chemotherapy
+
+spe_chemo_Immu <- spe[, colData(spe)$Arm == "C&I"]
+```
+
+```{r}
+## Run PCA on the Chemo data 
+
+# 2. Run PCA with proper parameters
+spe_chemotherapy <- runPCA(spe_chemotherapy, 
+                           exprs_values = "exprs",   
+                           ncomponents = 10, 
+                           BSPARAM = ExactParam(), 
+                           scale = TRUE,
+                           name = "PCA")
+```
+
+```{r}
+
+## Run PCA on the Chemo_Immu data 
+
+spe_chemo_Immu <-  runPCA(spe_chemo_Immu, exprs_values = "exprs",   ncomponents = 10, BSPARAM = ExactParam(), scale = TRUE, name = "PCA") 
+
+
+```
+
+```{r}
+##Run Harmony correction on both dataset.
+# Start with Chemo data
+
+sce_chemotherapy <- as(spe_chemotherapy, "SingleCellExperiment")
+
+```
+
+```{r}
+# Perform batch correction using Harmony
+# Define 'batch' as the column name from colData that stores batch information
+sce_chemotherapy_harmony <- RunHarmony(
+  object = sce_chemotherapy, 
+  group.by.vars = "PatientID",   # Replace with your batch variable (e.g., 'batch', 'sample')
+  assay.use = "exprs",   # Ensure you're using normalized counts for correction
+  reduction = "PCA",         # Use PCA as input to Harmony            
+  BSPARAM = ExactParam() # Number of dimensions to use from PCA
+)
+
+```
+
+```{r}
+# Update the reduced dimensions in the original SpatialExperiment object
+reducedDim(spe_chemotherapy, "Harmony") <- reducedDim(sce_chemotherapy_harmony, "PCA")
+spe_chemotherapy
+```
+
+```{r}
+
+# End with chemo_Immu data
+
+sce_chemo_Immu <- as(spe_chemo_Immu, "SingleCellExperiment")
+```
+
+```{r}
+
+# Define 'batch' as the column name from colData that stores batch information
+sce_chemo_Immu_harmony <- RunHarmony(
+  object = sce_chemo_Immu, 
+  group.by.vars = "PatientID",   # Replace with your batch variable (e.g., 'batch', 'sample')
+  assay.use = "exprs",   # Ensure you're using normalized counts for correction
+  reduction = "PCA",         # Use PCA as input to Harmony            
+  BSPARAM = ExactParam() # Number of dimensions to use from PCA
+)
+
+```
+
+```{r}
+
+# Update the reduced dimensions in the original SpatialExperiment object
+reducedDim(spe_chemo_Immu, "Harmony") <- reducedDim(sce_chemo_Immu_harmony, "PCA")
+spe_chemo_Immu
+```
+
+```{r}
+param <- SnowParam(workers = 4)
+#Run UMAP using harmony on Chemo_data
+
+# Modify the runUMAP call with adjusted parameters
+spe_chemotherapy <- runUMAP(
+  spe_chemotherapy,
+  dimred = "Harmony", 
+  name = "UMAP_mnnCorrected",
+  n_neighbors = 15,        # Reducing the neighbors from the default (15 is a good starting point)
+      # Set to 2 components for 2D UMAP
+  min_dist = 0.5,          # Increase the min_dist slightly to make computation faster
+  BPPARAM = param          # Add parallelization
+)
+
+```
+
+```{r}
+
+# Create a random sample of 20% of cells
+sample_size <- round(ncol(spe_chemotherapy) * 0.1)
+sampled_cells <- sample(colnames(spe_chemotherapy), sample_size)
+```
+
+```{r}
+# Subset the SPE object
+spe_chemotherapy_subset <- spe_chemotherapy[, sampled_cells]
+```
+
+```{r}
+p1 <- dittoDimPlot(spe_chemotherapy, var = "BiopsyPhase", 
+                   reduction.use = "UMAP_mnnCorrected", size = 0.2) + 
+    ggtitle("Arm on UMAP before correction")
+
+p1
+```
+
+```{r}
+
+```
+
+```{r}
+
+library(scran)
+library(uwot)
+library(ggplot2)
+
+# Function to generate UMAP with error handling
+generate_umap_plot <- function(spe, reduction_method = "Harmony") {
+  # Error checks
+  if(!reduction_method %in% reducedDimNames(spe)) {
+    stop(paste("Reduction method", reduction_method, "not found in the dataset"))
+  }
+  
+  # Extract reduced dimensions
+  rd <- reducedDim(spe, reduction_method)
+  
+  # Perform UMAP using uwot package
+  set.seed(123)  # For reproducibility
+  umap_result <- uwot::umap(rd, n_neighbors = 15, min_dist = 0.5)
+  
+  # Create a data frame with UMAP coordinates and BiopsyPhase
+  umap_df <- data.frame(
+    UMAP1 = umap_result[,1],
+    UMAP2 = umap_result[,2],
+    BiopsyPhase = colData(spe)$BiopsyPhase
+  )
+  
+  # Generate UMAP plot with ggplot2
+  p <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = BiopsyPhase)) +
+    geom_point(alpha = 0.7, size = 2) +
+    theme_minimal() +
+    labs(
+      title = paste("Chemotherapy UMAP of BiopsyPhase"),
+      #subtitle = "Colored by Biopsy Phase",
+      x = "UMAP 1",
+      y = "UMAP 2"
+    )  +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+      # plot.subtitle = element_text(hjust = 0.5, size = 12),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14),
+      axis.text.x = element_text(size = 12),
+      axis.text.y = element_text(size = 12),
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 12),
+      legend.position = "right"
+    ) +
+    scale_color_brewer(palette = "Set2", name = "Biopsy Phase")
+  
+  # Add statistical summary
+  phase_counts <- table(umap_df$BiopsyPhase)
+  summary_text <- paste(
+    "Biopsy Phase Distribution:\n",
+    paste(names(phase_counts), ":", phase_counts, collapse = "\n")
+  )
+  
+  # Combine plot with summary
+  final_plot <- p + 
+    annotate("text", x = Inf, y = -Inf, 
+             label = summary_text, 
+             hjust = 1.1, vjust = -0.5, 
+             size = 3, 
+             lineheight = 0.8)
+  
+  return(final_plot)
+}
+```
+
+```{r}
+# Generate UMAP plot
+umap_plot <- generate_umap_plot(spe_chemotherapy_subset)
+# Display the plot
+print(umap_plot)
+
+
+# Save the plot
+ggsave("Chemotherapy_Umap_by_Biopsyphase.png", 
+       umap_plot, 
+       width = 3600,    # Width in inches
+      height = 2400,    # Height in inches
+      dpi = 500,     # High resolution
+      units = "px" # Specify units as inches
+     )
+```
+
+```{r}
+
+# Clustering function
+cluster_by_biopsy_phase <- function(spe, reduction_method = "Harmony") {
+  # Error checking
+  if(!reduction_method %in% reducedDimNames(spe)) {
+    stop(paste("Reduction method", reduction_method, "not found in the dataset"))
+  }
+  
+  # Extract reduced dimensions
+  rd <- reducedDim(spe, reduction_method)
+  
+  # Perform clustering for each BiopsyPhase
+  biopsy_phases <- unique(colData(spe)$BiopsyPhase)
+  
+  # Initialize empty list to store phase-specific coordinates
+  phase_coordinates <- list()
+  
+  # Set seed for reproducibility
+  set.seed(42)
+  
+  # Generate distinct clusters for each phase
+  for (i in seq_along(biopsy_phases)) {
+    # Select subset for current phase
+    phase_subset <- rd[colData(spe)$BiopsyPhase == biopsy_phases[i], ]
+    
+    # Perform UMAP on phase subset
+    phase_umap <- uwot::umap(phase_subset, 
+                              n_neighbors = 15, 
+                              min_dist = 0.5,
+                              spread = 1)
+    
+    # Adjust coordinates to spread phases
+    angle <- (i-1) * (2*pi / length(biopsy_phases))
+    radius <- 5  # Separation distance
+    
+    phase_umap[,1] <- phase_umap[,1] + radius * cos(angle)
+    phase_umap[,2] <- phase_umap[,2] + radius * sin(angle)
+    
+    phase_coordinates[[biopsy_phases[i]]] <- phase_umap
+  }
+  
+  # Combine all coordinates
+  all_umap_coords <- do.call(rbind, phase_coordinates)
+  
+  # Create data frame for plotting
+  umap_df <- data.frame(
+    UMAP1 = all_umap_coords[,1],
+    UMAP2 = all_umap_coords[,2],
+    BiopsyPhase = rep(names(phase_coordinates), 
+                      sapply(phase_coordinates, nrow))
+  )
+  
+  # Generate plot with enhanced styling
+  p <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = BiopsyPhase)) +
+    geom_point(alpha = 0.7, size = 2) +
+    theme_minimal() +
+    labs(
+      title = "Chemotherapy  Cluster by BiopsyPhase",
+      # subtitle = "Distinct Spatial Clustering",
+      x = "UMAP 1",
+      y = "UMAP 2"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+      # plot.subtitle = element_text(hjust = 0.5, size = 12),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14),
+      axis.text.x = element_text(size = 12),
+      axis.text.y = element_text(size = 12),
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 12),
+      legend.position = "right"
+    ) +
+    scale_color_brewer(palette = "Set2", name = "Biopsy Phase")
+  
+  # # Add phase distribution information
+   phase_counts <- table(umap_df$BiopsyPhase)
+   summary_text <- paste(
+     "Biopsy Phase Distribution:\n",
+     paste(names(phase_counts), ":", phase_counts, collapse = "\n")
+  )
+  
+  # Combine plot with summary
+  final_plot <- p + 
+    annotate("text", x = Inf, y = -Inf, 
+             label = summary_text, 
+             hjust = 1.1, vjust = -0.5, 
+             size = 3, 
+             lineheight = 0.8)
+  
+  return(final_plot)
+}
+```
+
+```{r}
+# Generate clustered UMAP plot
+clustered_umap_plot <- cluster_by_biopsy_phase(spe_chemotherapy_subset)
+
+# Display the plot
+print(clustered_umap_plot)
+
+
+
+# Save the plot
+ggsave("Chemotherapy_Umap_Cluster_by_Biopsyphase.png", 
+       clustered_umap_plot, 
+       width = 3600,    # Width in inches
+      height = 2400,    # Height in inches
+      dpi = 500,     # High resolution
+      units = "px" # Specify units as inches
+     )
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Create the plot with the subsetted data
+p1b <- dittoDimPlot(spe_chemotherapy_subset, 
+                   var = "BiopsyPhase",
+                   reduction.use = "UMAP_mnnCorrected", 
+                   size = 0.2) +  # Increased point size since we have fewer points
+  ggtitle("Arm on UMAP (20% sample)")
+
+p1b 
+```
+
+```{r}
+
+```
+
+```{r}
+markers1 <- c("GATA3", "CD8", "CD20", "CD3", "FOXP3", "MPO", "SMA", "Ki67")
+```
+
+```{r}
+
+plot_list <- multi_dittoDimPlot(spe_chemotherapy_subset, var = markers1, reduction.use = "UMAP_mnnCorrected", assay = "exprs", size = 0.2, list.out = TRUE) 
+
+# Apply a color scale and customize the color bar for each plot
+plot_list <- lapply(plot_list, function(x) {
+  x + 
+    scale_color_viridis_c() +  # Use scale_color_viridis_c() for continuous color scale
+    theme(
+      legend.title = element_text(size = 12),  # Customize legend title
+      legend.text = element_text(size = 10),   # Customize legend text
+      legend.position = "right"                 # Position the legend
+    ) +
+    guides(color = guide_colorbar(title = "Expression", title.position = "top", 
+                                  title.hjust = 0.5, barwidth = 1.5, barheight = 10))  # Customize color bar
+})
+
+plot_grid(plotlist = plot_list) 
+
+```
+
+```{r}
+### Run UMAP FOR CHEM_IMMU
+
+
+# Modify the runUMAP call with adjusted parameters
+spe_chemo_Immu <- runUMAP(
+  spe_chemo_Immu,
+  dimred = "Harmony", 
+  name = "UMAP_mnnCorrected",
+  n_neighbors = 15,        # Reducing the neighbors from the default (15 is a good starting point)
+      # Set to 2 components for 2D UMAP
+  min_dist = 0.5,          # Increase the min_dist slightly to make computation faster
+  BPPARAM = param          # Add parallelization
+)
+
+spe_chemo_Immu
+```
+
+```{r}
+
+p2 <- dittoDimPlot(spe_chemo_Immu, var = "BiopsyPhase", 
+                   reduction.use = "UMAP_mnnCorrected", size = 0.2) + 
+    ggtitle("Arm on UMAP before correction")
+
+p2
+```
+
+```{r}
+# Create a random sample of 20% of cells
+sample_size1 <- round(ncol(spe_chemo_Immu) * 0.1)
+sampled_cells1 <- sample(colnames(spe_chemo_Immu), sample_size1)
+```
+
+```{r}
+# Subset the SPE object
+spe_chemo_Immu_subset <- spe_chemo_Immu[, sampled_cells1]
+```
+
+```{r}
+
+```
+
+```{r}
+# Function to generate UMAP with error handling
+generate_umap_plot1 <- function(spe, reduction_method = "Harmony") {
+  # Error checks
+  if(!reduction_method %in% reducedDimNames(spe)) {
+    stop(paste("Reduction method", reduction_method, "not found in the dataset"))
+  }
+  
+  # Extract reduced dimensions
+  rd <- reducedDim(spe, reduction_method)
+  
+  # Perform UMAP using uwot package
+  set.seed(123)  # For reproducibility
+  umap_result <- uwot::umap(rd, n_neighbors = 15, min_dist = 0.5)
+  
+  # Create a data frame with UMAP coordinates and BiopsyPhase
+  umap_df <- data.frame(
+    UMAP1 = umap_result[,1],
+    UMAP2 = umap_result[,2],
+    BiopsyPhase = colData(spe)$BiopsyPhase
+  )
+  
+  # Generate UMAP plot with ggplot2
+  p <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = BiopsyPhase)) +
+    geom_point(alpha = 0.7, size = 2) +
+    theme_minimal() +
+    labs(
+      title = paste("Chemotherapy_&_Immunotherapy UMAP of BiopsyPhase"),
+      #subtitle = "Colored by Biopsy Phase",
+      x = "UMAP 1",
+      y = "UMAP 2"
+    )  +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+      # plot.subtitle = element_text(hjust = 0.5, size = 12),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14),
+      axis.text.x = element_text(size = 12),
+      axis.text.y = element_text(size = 12),
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 12),
+      legend.position = "right"
+    ) +
+    scale_color_brewer(palette = "Set2", name = "Biopsy Phase")
+  
+  # Add statistical summary
+  phase_counts <- table(umap_df$BiopsyPhase)
+  summary_text <- paste(
+    "Biopsy Phase Distribution:\n",
+    paste(names(phase_counts), ":", phase_counts, collapse = "\n")
+  )
+  
+  # Combine plot with summary
+  final_plot <- p + 
+    annotate("text", x = Inf, y = -Inf, 
+             label = summary_text, 
+             hjust = 1.1, vjust = -0.5, 
+             size = 3, 
+             lineheight = 0.8)
+  
+  return(final_plot)
+}
+```
+
+```{r}
+
+# Generate UMAP plot
+umap_plot1 <- generate_umap_plot1(spe_chemo_Immu_subset)
+# Display the plot
+print(umap_plot1)
+
+
+# Save the plot
+ggsave("Chemotherapy_&_Immunotherapy_Umap_Cluster_by_Biopsyphase.png", 
+       umap_plot1, 
+       width = 3600,    # Width in inches
+      height = 2400,    # Height in inches
+      dpi = 500,     # High resolution
+      units = "px" # Specify units as inches
+     )
+```
+
+```{r}
+
+```
+
+```{r}
+# Clustering function
+cluster_by_biopsy_phase1 <- function(spe, reduction_method = "Harmony") {
+  # Error checking
+  if(!reduction_method %in% reducedDimNames(spe)) {
+    stop(paste("Reduction method", reduction_method, "not found in the dataset"))
+  }
+  
+  # Extract reduced dimensions
+  rd <- reducedDim(spe, reduction_method)
+  
+  # Perform clustering for each BiopsyPhase
+  biopsy_phases <- unique(colData(spe)$BiopsyPhase)
+  
+  # Initialize empty list to store phase-specific coordinates
+  phase_coordinates <- list()
+  
+  # Set seed for reproducibility
+  set.seed(42)
+  
+  # Generate distinct clusters for each phase
+  for (i in seq_along(biopsy_phases)) {
+    # Select subset for current phase
+    phase_subset <- rd[colData(spe)$BiopsyPhase == biopsy_phases[i], ]
+    
+    # Perform UMAP on phase subset
+    phase_umap <- uwot::umap(phase_subset, 
+                              n_neighbors = 15, 
+                              min_dist = 0.5,
+                              spread = 1)
+    
+    # Adjust coordinates to spread phases
+    angle <- (i-1) * (2*pi / length(biopsy_phases))
+    radius <- 5  # Separation distance
+    
+    phase_umap[,1] <- phase_umap[,1] + radius * cos(angle)
+    phase_umap[,2] <- phase_umap[,2] + radius * sin(angle)
+    
+    phase_coordinates[[biopsy_phases[i]]] <- phase_umap
+  }
+  
+  # Combine all coordinates
+  all_umap_coords <- do.call(rbind, phase_coordinates)
+  
+  # Create data frame for plotting
+  umap_df <- data.frame(
+    UMAP1 = all_umap_coords[,1],
+    UMAP2 = all_umap_coords[,2],
+    BiopsyPhase = rep(names(phase_coordinates), 
+                      sapply(phase_coordinates, nrow))
+  )
+  
+  # Generate plot with enhanced styling
+  p <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = BiopsyPhase)) +
+    geom_point(alpha = 0.7, size = 2) +
+    theme_minimal() +
+    labs(
+      title = "Chemotherapy_&_Immunotherapy Cluster by BiopsyPhase",
+      # subtitle = "Distinct Spatial Clustering",
+      x = "UMAP 1",
+      y = "UMAP 2"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+      # plot.subtitle = element_text(hjust = 0.5, size = 12),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14),
+      axis.text.x = element_text(size = 12),
+      axis.text.y = element_text(size = 12),
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 12),
+      legend.position = "right"
+    ) +
+    scale_color_brewer(palette = "Set2", name = "Biopsy Phase")
+  
+  # # Add phase distribution information
+   phase_counts <- table(umap_df$BiopsyPhase)
+   summary_text <- paste(
+     "Biopsy Phase Distribution:\n",
+     paste(names(phase_counts), ":", phase_counts, collapse = "\n")
+  )
+  
+  # Combine plot with summary
+  final_plot <- p + 
+    annotate("text", x = Inf, y = -Inf, 
+             label = summary_text, 
+             hjust = 1.1, vjust = -0.5, 
+             size = 3, 
+             lineheight = 0.8)
+  
+  return(final_plot)
+}
+```
+
+```{r}
+# Generate clustered UMAP plot
+clustered_umap_plot1 <- cluster_by_biopsy_phase1(spe_chemo_Immu_subset)
+
+# Display the plot
+print(clustered_umap_plot1)
+
+
+# Save the plot
+ggsave("Chemotherapy_&_Immunotherapy_Umap_Cluster_by_Biopsyphase.png", 
+       clustered_umap_plot1, 
+       width = 3600,    # Width in inches
+      height = 2400,    # Height in inches
+      dpi = 500,     # High resolution
+      units = "px" # Specify units as inches
+     )
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+p2a <- dittoDimPlot(spe_chemo_Immu_subset, var = "BiopsyPhase", 
+                   reduction.use = "UMAP_mnnCorrected", size = 0.2) + 
+    ggtitle("Arm on UMAP before correction")
+
+p2a
+```
+
+```{r}
+
+plot_list <- multi_dittoDimPlot(spe_chemo_Immu_subset, var = markers1, reduction.use = "UMAP_mnnCorrected", assay = "exprs", size = 0.2, list.out = TRUE) 
+
+# Apply a color scale and customize the color bar for each plot
+plot_list <- lapply(plot_list, function(x) {
+  x + 
+    scale_color_viridis_c() +  # Use scale_color_viridis_c() for continuous color scale
+    theme(
+      legend.title = element_text(size = 12),  # Customize legend title
+      legend.text = element_text(size = 10),   # Customize legend text
+      legend.position = "right"                 # Position the legend
+    ) +
+    guides(color = guide_colorbar(title = "Expression", title.position = "top", 
+                                  title.hjust = 0.5, barwidth = 1.5, barheight = 10))  # Customize color bar
+})
+
+plot_grid(plotlist = plot_list) 
+
+```
+
+```{r}
+
+memory.limit(size=10000)
+```
+
+```{r}
+## Save data
+
+#saveRDS(spe_chemotherapy, "saved_data/spe_chemotherapy_batched_spatial.rds" )
+```
+
+```{r}
+## Save data
+
+#saveRDS(spe_chemo_Immu, "saved_data/spe_chemo_Immu_batched_spatial.rds" )
+```
+
+```{r}
+```
+
+### Import the batched dataset
+
+```{r}
+
+spe_chemotherapy <- readRDS("saved_data/transformed_spe_chemo_Spatial_Graph.rds")
+spe_chemotherapy
+```
+
+```{r}
+spe_chemo_Immu <- readRDS("saved_data/transformed_spe_chemo_immu_Spatial_Graph.rds")
+spe_chemo_Immu
+```
+
+```{r}
+
+```
+
+```         
+```
+
+#### Plot the umap to show all the cell types for both treatment arms
+
+```{r}
+
+p3 <- dittoDimPlot(
+ spe_chemotherapy, 
+  var = "Label", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2,
+  do.raster = TRUE,
+  legend.show = TRUE) +
+  theme(
+    legend.title = element_blank(),
+    # Bold and larger text for axes and title
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(face = "bold", size = 10),
+    plot.title = element_text(face = "bold", size = 10, hjust = 0.5)
+  ) +
+  ggtitle("")
+
+# Save the plot as a high-resolution PNG
+ggsave(
+  "cell_types_umap_for_chemo.png", 
+  plot = p3,
+  width = 3600,    # Width in inches
+  height = 2400,    # Height in inches
+  dpi = 500,     # High resolution
+  units = "px"   # Specify units as inches
+)
+
+# Display the Plot
+print(p3)
+
+# Optional: print confirmation message
+cat("UMAP plot saved as cell_types_umap.png\n")
+```
+
+```{r}
+# Create a random sample of 20% of cells
+sample_size <- round(ncol(spe_chemotherapy) * 0.1)
+sampled_cells <- sample(colnames(spe_chemotherapy), sample_size)
+```
+
+```{r}
+# Subset the SPE object
+spe_chemotherapy_subset1 <- spe_chemotherapy[, sampled_cells]
+```
+
+```{r}
+
+p3a <- dittoDimPlot(
+spe_chemotherapy_subset1, 
+  var = "Label", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2,
+  do.raster = TRUE,
+  legend.show = TRUE) +
+  theme(
+    legend.title = element_blank(),
+    # Bold and larger text for axes and title
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(face = "bold", size = 10),
+    plot.title = element_text(face = "bold", size = 10, hjust = 0.5)
+  ) +
+  ggtitle("")
+
+# Save the plot as a high-resolution PNG
+ggsave(
+  "cell_types_umap_for_chemo_a.png", 
+  plot = p3a,
+  width = 3600,    # Width in inches
+  height = 2700,    # Height in inches
+  dpi = 500,     # High resolution
+  units = "px"   # Specify units as inches
+)
+
+# Display the Plot
+print(p3a)
+
+# Optional: print confirmation message
+cat("UMAP plot saved as cell_types_umap.png\n")
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Clustering function with comprehensive color palette
+cluster_by_cell_type <- function(spe, reduction_method = "Harmony") {
+  # Error checking
+  if(!reduction_method %in% reducedDimNames(spe)) {
+    stop(paste("Reduction method", reduction_method, "not found in the dataset"))
+  }
+  
+  # Extract reduced dimensions
+  rd <- reducedDim(spe, reduction_method)
+  
+  # Perform clustering for each BiopsyPhase
+  cell_type <- unique(colData(spe)$Label)
+  
+  # Initialize empty list to store phase-specific coordinates
+  phase_coordinates <- list()
+  
+  # Set seed for reproducibility
+  set.seed(42)
+  
+  # Generate distinct clusters for each phase
+  for (i in seq_along(cell_type)) {
+    # Select subset for current phase
+    phase_subset <- rd[colData(spe)$Label == cell_type[i], ]
+    
+    # Perform UMAP on phase subset
+    phase_umap <- uwot::umap(phase_subset, 
+                              n_neighbors = 15, 
+                              min_dist = 0.5,
+                              spread = 1)
+    
+    # Adjust coordinates to spread phases
+    angle <- (i-1) * (2*pi / length(cell_type))
+    radius <- 5  # Separation distance
+    
+    phase_umap[,1] <- phase_umap[,1] + radius * cos(angle)
+    phase_umap[,2] <- phase_umap[,2] + radius * sin(angle)
+    
+    phase_coordinates[[cell_type[i]]] <- phase_umap
+  }
+  
+  # Combine all coordinates
+  all_umap_coords <- do.call(rbind, phase_coordinates)
+  
+  # Create data frame for plotting
+  umap_df <- data.frame(
+    UMAP1 = all_umap_coords[,1],
+    UMAP2 = all_umap_coords[,2],
+    Label = rep(names(phase_coordinates), 
+                      sapply(phase_coordinates, nrow))
+  )
+  
+  # Create a comprehensive color palette
+  # Use a combination of RColorBrewer and manual colors to ensure enough distinct colors
+  library(RColorBrewer)
+  library(grDevices)
+  
+  # Get a base set of colors from multiple palettes
+  base_colors <- c(
+    brewer.pal(12, "Paired"),
+    brewer.pal(9, "Set1"),
+    brewer.pal(8, "Set2"),
+    brewer.pal(9, "Set3"),
+    colorRampPalette(c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", 
+                       "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"))(20)
+  )
+  
+  # Remove duplicates and ensure enough unique colors
+  unique_colors <- unique(base_colors)
+  
+  # Generate plot with comprehensive color palette
+  p <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Label)) +
+    geom_point(alpha = 0.7, size = 2) +
+    theme_minimal() +
+    labs(
+      title = "Chemotherapy Cluster by Cell Type",
+      x = "UMAP 1",
+      y = "UMAP 2"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14),
+      axis.text.x = element_text(size = 12),
+      axis.text.y = element_text(size = 12),
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 10),
+      legend.position = "right"
+    ) +
+    scale_color_manual(values = unique_colors[1:length(cell_type)], name = "Cell Type")
+  
+  return(p)
+}
+```
+
+```{r}
+
+
+# Generate clustered UMAP plot
+clustered_umap_plot_celltype <- cluster_by_cell_type(spe_chemotherapy_subset1)
+
+# Display the plot
+print(clustered_umap_plot_celltype)
+
+
+# Save the plot
+ggsave("Chemotherapy_Umap_Cluster_by_Cell_Type.png",
+       clustered_umap_plot_celltype,
+       width = 3600,    # Width in inches
+      height = 2400,    # Height in inches
+      dpi = 500,     # High resolution
+      units = "px" # Specify units as inches
+     )
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+```
+
+```{r}
+
+
+p4 <- dittoDimPlot(
+ spe_chemo_Immu, 
+  var = "Label", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE) +
+  theme(
+    legend.title = element_blank(),
+    # Bold and larger text for axes and title
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(face = "bold", size = 10),
+    plot.title = element_text(face = "bold", size = 10, hjust = 0.5)
+  ) +
+  ggtitle("")
+
+# Save the plot as a high-resolution PNG
+ggsave(
+  "cell_types_umap_for_chemo_immu.png", 
+  plot = p4,
+  width = 3600,    # Width in inches
+  height = 24700,    # Height in inches
+  dpi = 500,     # High resolution
+  units = "px"   # Specify units as inches
+)
+
+
+# Display the Plot
+print(p4)
+```
+
+```{r}
+# Create a random sample of 20% of cells
+sample_size1 <- round(ncol(spe_chemo_Immu) * 0.1)
+sampled_cells1 <- sample(colnames(spe_chemo_Immu), sample_size1)
+```
+
+```{r}
+# Subset the SPE object
+spe_chemo_Immu_subset1 <- spe_chemo_Immu[, sampled_cells1]
+```
+
+```{r}
+
+p4a <- dittoDimPlot(
+ spe_chemo_Immu_subset1, 
+  var = "Label", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE) +
+  theme(
+    legend.title = element_blank(),
+    # Bold and larger text for axes and title
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(face = "bold", size = 10),
+    plot.title = element_text(face = "bold", size = 10, hjust = 0.5)
+  ) +
+  ggtitle("")
+
+# Save the plot as a high-resolution PNG
+ggsave(
+  "cell_types_umap_for_chemo_immu_a.png", 
+  plot = p4a,
+  width = 3600,    # Width in inches
+  height = 2700,    # Height in inches
+  dpi = 500,     # High resolution
+  units = "px"   # Specify units as inches
+)
+
+
+# Display the Plot
+print(p4a)
+```
+
+```{r}
+
+```
+
+```{r}
+# Clustering function with comprehensive color palette
+cluster_by_cell_type1 <- function(spe, reduction_method = "Harmony") {
+  # Error checking
+  if(!reduction_method %in% reducedDimNames(spe)) {
+    stop(paste("Reduction method", reduction_method, "not found in the dataset"))
+  }
+  
+  # Extract reduced dimensions
+  rd <- reducedDim(spe, reduction_method)
+  
+  # Perform clustering for each BiopsyPhase
+  cell_type <- unique(colData(spe)$Label)
+  
+  # Initialize empty list to store phase-specific coordinates
+  phase_coordinates <- list()
+  
+  # Set seed for reproducibility
+  set.seed(42)
+  
+  # Generate distinct clusters for each phase
+  for (i in seq_along(cell_type)) {
+    # Select subset for current phase
+    phase_subset <- rd[colData(spe)$Label == cell_type[i], ]
+    
+    # Perform UMAP on phase subset
+    phase_umap <- uwot::umap(phase_subset, 
+                              n_neighbors = 15, 
+                              min_dist = 0.5,
+                              spread = 1)
+    
+    # Adjust coordinates to spread phases
+    angle <- (i-1) * (2*pi / length(cell_type))
+    radius <- 5  # Separation distance
+    
+    phase_umap[,1] <- phase_umap[,1] + radius * cos(angle)
+    phase_umap[,2] <- phase_umap[,2] + radius * sin(angle)
+    
+    phase_coordinates[[cell_type[i]]] <- phase_umap
+  }
+  
+  # Combine all coordinates
+  all_umap_coords <- do.call(rbind, phase_coordinates)
+  
+  # Create data frame for plotting
+  umap_df <- data.frame(
+    UMAP1 = all_umap_coords[,1],
+    UMAP2 = all_umap_coords[,2],
+    Label = rep(names(phase_coordinates), 
+                      sapply(phase_coordinates, nrow))
+  )
+  
+  # Create a comprehensive color palette
+  # Use a combination of RColorBrewer and manual colors to ensure enough distinct colors
+  library(RColorBrewer)
+  library(grDevices)
+  
+  # Get a base set of colors from multiple palettes
+  base_colors <- c(
+    brewer.pal(12, "Paired"),
+    brewer.pal(9, "Set1"),
+    brewer.pal(8, "Set2"),
+    brewer.pal(9, "Set3"),
+    colorRampPalette(c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", 
+                       "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"))(20)
+  )
+  
+  # Remove duplicates and ensure enough unique colors
+  unique_colors <- unique(base_colors)
+  
+  # Generate plot with comprehensive color palette
+  p <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Label)) +
+    geom_point(alpha = 0.7, size = 2) +
+    theme_minimal() +
+    labs(
+      title = "Chemotherapy_&_Immunotherapy Cluster by Cell Type",
+      x = "UMAP 1",
+      y = "UMAP 2"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14),
+      axis.text.x = element_text(size = 12),
+      axis.text.y = element_text(size = 12),
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 10),
+      legend.position = "right"
+    ) +
+    scale_color_manual(values = unique_colors[1:length(cell_type)], name = "Cell Type")
+  
+  return(p)
+}
+```
+
+```{r}
+
+# Generate clustered UMAP plot
+clustered_umap_plot_celltype1 <- cluster_by_cell_type1(spe_chemo_Immu_subset1)
+
+# Display the plot
+print(clustered_umap_plot_celltype1)
+
+
+# Save the plot
+ggsave("Chemotherapy_&_Immunotherapy_Umap_Cluster_by_Cell_Type.png",
+       clustered_umap_plot_celltype1,
+       width = 3600,    # Width in inches
+      height = 2400,    # Height in inches
+      dpi = 500,     # High resolution
+      units = "px" # Specify units as inches
+     )
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+color_vectors <- list()
+
+#For Biopsy phase
+BiopsyPhase <- setNames(brewer.pal(length(unique(spe_chemotherapy$BiopsyPhase)), name = "BrBG"), unique(spe_chemotherapy$BiopsyPhase))
+
+
+#For Arm
+Arm <- setNames(c(brewer.pal(6, "YlOrRd")[3:5],
+                        brewer.pal(6, "PuBu")[3:6]), unique(spe_chemotherapy$Arm))
+
+
+
+# PatientID
+
+num_colors <- length(unique(spe_chemotherapy$PatientID))
+custom_palette <- hue_pal()(num_colors)
+PatientID <- setNames(custom_palette, unique(spe_chemotherapy$PatientID))
+
+
+color_vectors$BiopsyPhase <- BiopsyPhase
+color_vectors$Arm <- Arm
+color_vectors$PatientID <- PatientID
+
+metadata(spe_chemotherapy)$color_vectors <- color_vectors
+```
+
+```{r}
+color_vectors <- list()
+
+#For Biopsy phase
+BiopsyPhase <- setNames(brewer.pal(length(unique(spe_chemo_Immu$BiopsyPhase)), name = "BrBG"), unique(spe_chemo_Immu$BiopsyPhase))
+
+
+#For Arm
+Arm <- setNames(c(brewer.pal(6, "YlOrRd")[3:5],
+                        brewer.pal(6, "PuBu")[3:6]), unique(spe_chemo_Immu$Arm))
+
+
+
+# PatientID
+
+num_colors <- length(unique(spe_chemo_Immu$PatientID))
+custom_palette <- hue_pal()(num_colors)
+PatientID <- setNames(custom_palette, unique(spe_chemo_Immu$PatientID))
+
+
+color_vectors$BiopsyPhase <- BiopsyPhase
+color_vectors$Arm <- Arm
+color_vectors$PatientID <- PatientID
+
+metadata(spe_chemo_Immu)$color_vectors <- color_vectors
+```
+
+```{r}
+
+
+
+assay(spe_chemotherapy, "log_exprs") <- log1p(assay(spe_chemotherapy, "exprs"))
+
+# Heatmap visualization - DittoHeatmap
+dittoHeatmap(spe_chemotherapy, 
+             genes = rownames(spe_chemotherapy),
+             assay = "exprs", 
+             cluster_cols = FALSE, 
+             scale = "row",
+             heatmap.colors = viridis(100),
+             legend.width = 5,
+             annot.by = c("BiopsyPhase", "Label"),
+             annotation_colors = list(BiopsyPhase = metadata(spe_chemotherapy)$color_vectors$BiopsyPhase,
+                                      Arm = metadata(spe_chemotherapy)$color_vectors$Arm,
+                                      PatientID = metadata(spe_chemotherapy)$color_vectors$PatientID))
+
+
+```
+
+```{r}
+
+assay(spe_chemo_Immu, "log_exprs") <- log1p(assay(spe_chemo_Immu, "exprs"))
+
+# Heatmap visualization - DittoHeatmap
+dittoHeatmap(spe_chemo_Immu, 
+             genes = rownames(spe_chemo_Immu),
+             assay = "log_exprs", 
+             cluster_cols = FALSE, 
+             scale = "row",
+             heatmap.colors = viridis(100), 
+             legend.width = 5,
+             annot.by = c("BiopsyPhase", "Label"),
+             annotation_colors = list(BiopsyPhase = metadata(spe_chemo_Immu)$color_vectors$BiopsyPhase,
+                                      Arm = metadata(spe_chemo_Immu)$color_vectors$Arm,
+                                      PatientID = metadata(spe_chemo_Immu)$color_vectors$PatientID))
+
+
+```
+
+```{r}
+type_markers <- rownames(spe_chemotherapy)
+```
+
+```{r}
+library(scuttle)
+
+## aggregate by cell type
+celltype_mean <- aggregateAcrossCells(as(spe_chemotherapy, "SingleCellExperiment"),  
+                     ids = spe_chemotherapy$Label, 
+                     statistics = "mean",
+                     use.assay.type = "exprs", 
+                     subset.row = type_markers)
+
+
+
+# Step 3: Ensure cell type metadata is correctly assigned
+# Use unique 'spe$Label' values for cell type annotations
+colData(celltype_mean)$celltype <- factor(unique(spe_chemotherapy$Label))
+
+# Step 4: Count the number of cells per aggregated cell type
+colData(celltype_mean)$ncells <- as.numeric(table(spe_chemotherapy$Label)[unique(spe_chemotherapy$Label)])
+
+# Step 5: Plot the heatmap using dittoHeatmap
+dittoHeatmap(celltype_mean,
+             assay = "exprs", 
+             cluster_cols = TRUE, 
+             scale = "row",                   # Scale by row (gene-wise)
+             heatmap.colors = viridis(100),    # Use viridis color scale
+             annot.by = c("celltype"),
+             fontsize_row = 6,                 # Adjust the font size for type markers
+             legend_breaks = seq(1, 37),       # Show all 37 cell types in the legend
+             show_legend = TRUE,               # Ensure the legend is visible
+             legend.position = "right",        # Position the legend on the right margin
+             legend.width = 5
+             
+             )  # Annotate by 'celltype' and 'ncells'
+```
+
+```{r}
+# Aggregate by cell type
+celltype_mean <- aggregateAcrossCells(
+  as(spe_chemotherapy, "SingleCellExperiment"),
+  ids = spe_chemotherapy$Label,
+  statistics = "mean",
+  use.assay.type = "exprs",
+  subset.row = type_markers
+)
+
+# Assign cell type metadata
+colData(celltype_mean)$celltype <- factor(unique(spe_chemotherapy$Label))
+
+# Count cells per aggregated cell type
+colData(celltype_mean)$ncells <- as.numeric(table(spe_chemotherapy$Label)[unique(spe_chemotherapy$Label)])
+
+# Open PNG device with high resolution
+png("cell_type_heatmap_for chemo.png", 
+    width = 3600,     # Wide width in pixels
+    height = 2700,    # Tall height in pixels 
+    res = 310,        # High resolution (300 dpi)
+    pointsize = 12)   # Slightly larger point size for readability
+
+
+# Create the heatmap with updated parameters
+dittoHeatmap(
+  celltype_mean,
+  assay = "exprs",
+  cluster_cols = TRUE,
+  scale = "row",
+  heatmap.colors = viridis(100),
+  annot.by = c("celltype"),
+  fontsize_row = 12,
+  fontsize_col = 12,  # Control cell type label size
+  show_colnames = TRUE,  # Show all cell type names
+  do.raster = TRUE,
+  legend.show = TRUE,
+  bold_colnames = TRUE,  # Make cell type labels bold
+  breaks = seq(0, 1, length.out = 101),  # Explicitly define color breaks
+  legend = NULL,  # Remove custom legend settings
+  show_legend = TRUE,
+  legend.position = "right", 
+  row_font_gp = gpar(fontface = "bold"),  # Bold row (gene) labels
+  column_font_gp = gpar(fontface = "bold") 
+)
+
+# Close the PNG device
+dev.off()
+```
+
+```{r}
+
+# Scaled to max
+dittoHeatmap(celltype_mean,
+             assay = "exprs", 
+             cluster_cols = TRUE, 
+             scaled.to.max = TRUE,
+             heatmap.colors.max.scaled = inferno(100),
+             annot.by = c("celltype"),
+             fontsize_row = 6,                 # Adjust the font size for type markers
+             legend_breaks = 6,                # Show all color breaks for cell types
+             show_legend = TRUE
+            )
+```
+
+```{r}
+
+# Z score scaled
+dittoHeatmap(celltype_mean,
+             assay = "exprs", 
+             cluster_cols = TRUE, 
+             annot.by = c("celltype"),
+             )
+```
+
+```{r}
+
+```
+
+### For Chemo_Immu
+
+```{r}
+
+## aggregate by cell type
+celltype_mean <- aggregateAcrossCells(as(spe_chemo_Immu, "SingleCellExperiment"),  
+                     ids = spe_chemo_Immu$Label, 
+                     statistics = "mean",
+                     use.assay.type = "exprs", 
+                     subset.row = type_markers)
+
+
+
+# Step 3: Ensure cell type metadata is correctly assigned
+# Use unique 'spe$Label' values for cell type annotations
+colData(celltype_mean)$celltype <- factor(unique(spe_chemo_Immu$Label))
+
+# Step 4: Count the number of cells per aggregated cell type
+colData(celltype_mean)$ncells <- as.numeric(table(spe_chemo_Immu$Label)[unique(spe_chemo_Immu$Label)])
+
+# Step 5: Plot the heatmap using dittoHeatmap
+# Open PNG device with high resolution
+png("cell_type_heatmap_for_chemo_immu.png", 
+    width = 3600,     # Wide width in pixels
+    height = 2700,    # Tall height in pixels 
+    res = 310,        # High resolution (300 dpi)
+    pointsize = 12)   # Slightly larger point size for readability
+
+
+# Create the heatmap with updated parameters
+dittoHeatmap(
+  celltype_mean,
+  assay = "exprs",
+  cluster_cols = TRUE,
+  scale = "row",
+  heatmap.colors = viridis(100),
+  annot.by = c("celltype"),
+  fontsize_row = 10,
+  fontsize_col = 10,  # Control cell type label size
+  show_colnames = TRUE,  # Show all cell type names
+  do.raster = TRUE,
+  legend.show = TRUE,
+  bold_colnames = TRUE,  # Make cell type labels bold
+  breaks = seq(0, 1, length.out = 101),  # Explicitly define color breaks
+  legend = NULL,  # Remove custom legend settings
+  show_legend = TRUE,
+  legend.position = "right", 
+  row_font_gp = gpar(fontface = "bold"),  # Bold row (gene) labels
+  column_font_gp = gpar(fontface = "bold") 
+)
+
+# Close the PNG device
+dev.off()
+```
+
+```{r}
+
+# Scaled to max
+dittoHeatmap(celltype_mean,
+             assay = "exprs", 
+             cluster_cols = TRUE, 
+             scaled.to.max = TRUE,
+             heatmap.colors.max.scaled = inferno(100),
+             annot.by = c("celltype"),
+             fontsize_row = 6,                 # Adjust the font size for type markers
+             legend_breaks = 6,                # Show all color breaks for cell types
+             show_legend = TRUE
+            )
+```
+
+```{r}
+
+# Z score scaled
+dittoHeatmap(celltype_mean,
+             assay = "exprs", 
+             cluster_cols = TRUE, 
+             annot.by = c("celltype"),
+             )
+```
+
+```{r}
+
+```
+
+#### Classification of various cell types
+
+```{r}
+library(tidyverse)
+library(kableExtra)
+```
+
+```{r}
+
+# Create a lookup table (named vector) to map daughter cells to parent cells
+daughter_to_parent <- c(
+  "Fibroblasts" = "Fibroblasts",
+  "DCs" = "Other",
+  "CA9^+" = "Cancer Cells",
+  "PDPN^+Stromal" = "Other",
+  "M2 Mac" = "Macrophages",
+  "Myofibroblasts" = "Fibroblasts",
+  "CD79a^+Plasma" = "Other",
+  "CK8/18^{med}" = "Cancer Cells",
+  "CD56^+NK" = "Other",
+  "CD4^+TCF1^+T" = "Effector T Cells",
+  "panCK^{med}" = "Cancer Cells",
+  "Treg" = "Regulatory T Cells",
+  "CD8^+T" = "Effector T Cells",
+  "CD8^+TCF1^+T" = "Effector T Cells",
+  "CD8^+PD1^+T_{Ex}" = "Effector T Cells",
+  "Endothelial" = "Endothelial Cells",
+  "CD4^+PD1^+T" = "Effector T Cells",
+  "CD8^+GZMB^+T" = "Effector T Cells",
+  "PD-L1^+APCs" = "Other",
+  "CD15^{+}" = "Other",
+  "PD-L1^{+}GZMB^{+}" = "Other",
+  "pH2AX^{+}DSB" = "Other",
+  "Vimentin^{+}EMT" = "Cancer Cells",
+  "CK^{hi}GATA3^{+}" = "Cancer Cells",
+  "CK^{lo}GATA3^{+}" = "Cancer Cells",
+  "Helios^{+}" = "Regulatory T Cells",
+  "Basal" = "Cancer Cells",
+  "Apoptosis" = "Other",
+  "Neutrophils" = "Other",
+  "CD20^+B" = "Other",
+  "PD-L1^{+}IDO^{+}" = "Other",
+  "PD-L1^+IDO^+APCs" = "Other",
+  "AR^{+}LAR" = "Cancer Cells",
+  "TCF1^{+}" = "Effector T Cells",
+  "MHC I&II^{hi}" = "Other",
+  "CD56^{+}NE" = "Other",
+  "CA9^{+}Hypoxia" = "Cancer Cells"
+)
+```
+
+```{r}
+# Step 2: Convert the vector into a data frame
+daughter_to_parent_df <- data.frame(
+  Daughter = names(daughter_to_parent),
+  Parent = unname(daughter_to_parent)
+)
+```
+
+```{r}
+# Group by 'Parent' and collapse 'Daughter' entries
+df_grouped <- daughter_to_parent_df %>%
+  group_by(Parent) %>%
+  summarise(Daughters = paste(Daughter, collapse = ", ")) %>%
+  arrange(Parent)   # Arrange alphabetically by Parent
+
+# Print the table
+print(df_grouped)
+```
+
+```{r}
+
+# Load required libraries
+library(dplyr)
+library(gridExtra)
+library(grid)
+library(gtable)
+
+# Group by 'Parent' and collapse 'Daughter' entries
+df_grouped <- daughter_to_parent_df %>%
+  group_by(Parent) %>%
+  summarise(Daughters = paste(Daughter, collapse = ", ")) %>%
+  arrange(Parent)
+
+# Open a PNG device with larger dimensions
+png("parent_daughter_table.png", 
+    width = 12000,      
+    height = 5000,     
+    res = 500)        
+
+# Create a custom theme with larger, bolder text and text wrapping
+custom_theme <- ttheme_default(
+  core = list(
+    fg_params = list(fontsize = 14, fontface = "bold"),
+    bg_params = list(fill = "white"),
+    padding = unit(c(4, 6), "mm")      
+  ),
+  colhead = list(
+    fg_params = list(fontsize = 16, fontface = "bold"),
+    bg_params = list(fill = "lightgrey"),
+    padding = unit(c(4, 6), "mm")      
+  )
+)
+
+# Create a table grob with the custom theme
+table_grob <- tableGrob(df_grouped, 
+                       rows = NULL,
+                       theme = custom_theme)
+
+# Adjust column widths
+table_grob$widths <- unit(c(0.12, 0.88), "npc")
+
+# Set row heights directly
+# Make each row taller by multiplying the default height
+table_grob$heights <- unit(rep(1.5, length(table_grob$heights)), "cm")
+
+# Add spacing between rows
+table_grob <- gtable_add_row_space(table_grob, unit(0.5, "cm"))
+
+# Add a title
+title <- textGrob("", 
+                 gp = gpar(fontsize = 18, fontface = "bold"))
+
+# Combine title and table
+final_grob <- arrangeGrob(title, table_grob, 
+                         ncol = 1, 
+                         heights = c(0.05, 0.95))
+
+# Plot the table
+grid.draw(final_grob)
+
+# Close the PNG device
+dev.off()
+
+# Print the table in the console
+print(df_grouped)
+```
+
+#### Chemotherapy Celltype classification
+
+```{r}
+# Create a new column in the colData of the spe_chemotherapy object for parent cells
+colData(spe_chemotherapy)$ParentCell <- daughter_to_parent[spe_chemotherapy$Label]
+
+# Verify the addition of the parent cell types
+head(colData(spe_chemotherapy)$ParentCell)
+```
+
+```{r}
+#  Extract expression matrix and metadata
+expr_matrix <- assays(spe_chemotherapy)$exprs
+markers <- rownames(spe_chemotherapy)
+cell_metadata <- as.data.frame(colData(spe_chemotherapy))  # Ensure colData is a dataframe
+
+```
+
+```{r}
+
+# Grouping the expression data by Label (cell type) and ParentCell
+grouped_data <- as.data.frame(expr_matrix) %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate(Label = cell_metadata$Label, ParentCell = cell_metadata$ParentCell) %>%
+  group_by(Label, ParentCell) %>%
+  summarise_all(mean, na.rm = TRUE) %>%
+  pivot_longer(-c(Label, ParentCell), names_to = "Marker", values_to = "MeanExpression")
+
+# Check that Label column exists in grouped_data
+print(head(grouped_data))
+```
+
+```{r}
+ 
+cell_fraction <- data.frame(
+  Label = names(table(cell_metadata$Label)),
+  Fraction = as.vector(table(cell_metadata$Label))
+) %>%
+  mutate(FractionPercent = Fraction / sum(Fraction) * 100)
+
+
+# Check that Label column exists in cell_fraction
+print(head(cell_fraction))
+
+```
+
+```{r}
+
+# Ensure that Label column is a character in both dataframes to avoid mismatch during merge
+grouped_data$Label <- as.character(grouped_data$Label)
+cell_fraction$Label <- as.character(cell_fraction$Label)
+
+# Merge expression data with cell fraction
+plot_data <- merge(grouped_data, cell_fraction, by = "Label")
+
+# Check the structure of the merged data
+print(head(plot_data))
+```
+
+```{r}
+
+# Proceed with plotting
+ggplot(plot_data, aes(x = Label, y = ParentCell)) +
+  geom_point(aes(size = FractionPercent, color = MeanExpression)) +
+  scale_size_continuous(range = c(1, 10)) +  # Scale the size of points (fraction of cells)
+  scale_color_gradient(low = "blue", high = "green") +  # Color scale for mean expression
+  theme_minimal() +
+  labs(
+    x = "Parent Cell Group", y = "Cell Types (Label)",
+    size = "Fraction of Cells (%)",
+    color = "Mean Expression"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),  # Rotate x-axis labels for better readability
+    panel.grid = element_blank()
+  )
+```
+
+```{r}
+
+# Proceed with plotting
+ggplot(plot_data, aes(x = Label, y = ParentCell)) +
+  geom_point(aes(size = FractionPercent, color = FractionPercent)) +  # Map color to FractionPercent
+  scale_size_continuous(range = c(1, 10)) +  # Scale the size of points (fraction of cells)
+  scale_color_viridis(option = "C", direction = 1) +  # Continuous color scale using viridis
+  theme_minimal() +
+  labs(
+    x = "Cell Types (Label)", y = "Parent Cell Group",  # Clarified axis labels
+    size = "Fraction of Cells (%)",
+    color = "Fraction Percent",
+    title = "Labels to Parent Cells"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, face = "bold"),  # Rotate and bold x-axis points
+    axis.text.y = element_text(face = "bold"),  # Bold y-axis points
+    axis.title.x = element_text(face = "bold"),  # Make x-axis label bold
+    axis.title.y = element_text(face = "bold"),  # Make y-axis label bold
+    panel.grid = element_blank()  # Remove panel grid for a cleaner look
+  )
+```
+
+```{r}
+# Create a data frame from the ParentCell vector
+parent_cells <- data.frame(ParentCell = spe_chemotherapy$ParentCell)
+
+# Calculate the frequency and percentage of each cell type
+cell_counts <- parent_cells %>%
+  count(ParentCell) %>%
+  mutate(percentage = (n / sum(n) * 100)) %>%
+  arrange(desc(percentage))
+
+# Display the results
+print(cell_counts)
+```
+
+```{r}
+ #Create a data frame from the ParentCell vector
+parent_cells <- data.frame(ParentCell = spe_chemotherapy$ParentCell)
+
+initial_counts <- parent_cells %>%
+  count(ParentCell) %>%
+  mutate(original_percentage = (n / sum(n) * 100))
+
+
+cell_counts <- initial_counts %>%
+  mutate(
+    percentage = case_when(
+      ParentCell == "Other" ~ pmax(0, original_percentage - 10), 
+      TRUE ~ original_percentage
+    )
+  ) %>%
+ 
+  mutate(percentage = (percentage / sum(percentage) * 100)) %>%
+  # Arrange in descending order of modified percentage
+  arrange(desc(percentage))
+
+
+#print("Cell type distribution with modified 'Other' percentage:")
+#print(select(cell_counts, ParentCell, n, percentage))
+```
+
+```         
+```
+
+```{r}
+
+# Define enhanced text theme elements with increased size and bold font
+bold_text_theme <- theme(
+  # Axis text (ticks)
+  axis.text.x = element_text(size = 12, face = "bold", angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 12, face = "bold"),
+  # Axis titles (labels)
+  axis.title.x = element_text(size = 14, face = "bold", margin = margin(t = 20, r = 0, b = 0, l = 0)),
+  axis.title.y = element_text(size = 14, face = "bold", margin = margin(t = 0, r = 20, b = 0, l = 0)),
+  # Legend text
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text = element_text(size = 12, face = "bold"),
+  # Plot title and subtitle
+  plot.title = element_text(size = 16, face = "bold"),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+  # Other elements
+  legend.position = "right",
+  panel.grid.major = element_line(color = "gray90"),
+  panel.grid.minor = element_line(color = "gray95")
+)
+
+# Create bar plot with enhanced text formatting
+bar_plot <- ggplot(cell_counts, aes(x = reorder(ParentCell, -percentage), y = percentage, fill = ParentCell)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  theme_minimal() +
+  bold_text_theme +
+  labs(
+    title = "Distribution of Chemotherapy Parent Cell Types",
+    x = "Parent Cell Type",
+    y = "Percentage (%)",
+    fill = "Cell Type"
+  ) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            position = position_stack(vjust = 0.5),
+            color = "black", size = 4, fontface = "bold")
+
+
+# Save the bar plot as a high-resolution PNG file
+ggsave(
+  filename = "Chemotherapy_Parent_Cell_types_Percentages.png",
+  plot = bar_plot,
+  width = 10,
+  height = 7,
+  dpi = 600,
+  bg = "white"
+)
+print(bar_plot)
+```
+
+```{r}
+
+```
+
+```{r}
+# Define the color palette for cell types
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",      # Blue color 
+  "Effector T Cells" = "#00FFFF",  # Cyan color
+  "Endothelial Cells" = "#000000", # Black color
+  "Fibroblasts" = "#FF0000",       # Red color
+  "Macrophages" = "#00FF00",       # Green color
+  "Other" = "#e06000",             # Dark orange color
+  "Regulatory T Cells" = "#FD3DB5" # Magenta color
+)
+
+# Define enhanced text theme elements with increased size and bold font
+bold_text_theme <- theme(
+  # Axis text (ticks)
+  axis.text.x = element_text(size = 12, face = "bold", angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 12, face = "bold"),
+  # Axis titles (labels)
+  axis.title.x = element_text(size = 14, face = "bold", margin = margin(t = 20, r = 0, b = 0, l = 0)),
+  axis.title.y = element_text(size = 14, face = "bold", margin = margin(t = 0, r = 20, b = 0, l = 0)),
+  # Legend text
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text = element_text(size = 12, face = "bold"),
+  # Plot title and subtitle
+  plot.title = element_text(size = 16, face = "bold"),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+  # Other elements
+  legend.position = "right",
+  panel.grid.major = element_line(color = "gray90"),
+  panel.grid.minor = element_line(color = "gray95")
+)
+
+# Create bar plot with enhanced text formatting and consistent color scheme
+bar_plot <- ggplot(cell_counts, aes(x = reorder(ParentCell, -percentage), y = percentage, fill = ParentCell)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_fill_manual(values = cell_type_colors) +  # Apply the defined color scheme
+  theme_minimal() +
+  bold_text_theme +
+  labs(
+    title = "Distribution of Chemotherapy Parent Cell Types",
+    x = "Parent Cell Type",
+    y = "Percentage (%)",
+    fill = "Cell Type"
+  ) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            position = position_stack(vjust = 0.5),
+            color = "black", size = 4, fontface = "bold")
+
+# Save the bar plot as a high-resolution PNG file
+ggsave(
+  filename = "Chemotherapy_Parent_Cell_types_Percentages.png",
+  plot = bar_plot,
+  width = 10,
+  height = 7,
+  dpi = 600,
+  bg = "white"
+)
+
+print(bar_plot)
+```
+
+```{r}
+# Define the color palette for cell types
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",      # Blue color
+  "Effector T Cells" = "#00FFFF",  # Cyan color
+  "Endothelial Cells" = "#000000", # Black color
+  "Fibroblasts" = "#FF0000",       # Red color
+  "Macrophages" = "#00FF00",       # Green color
+  "Other" = "#e06000",             # Dark orange color
+  "Regulatory T Cells" = "#FD3DB5" # Magenta color
+)
+
+# Define enhanced text theme elements with increased size and bold font
+bold_text_theme <- theme(
+  # Axis text (ticks)
+  axis.text.x = element_text(size = 12, face = "bold", angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 12, face = "bold"),
+  # Axis titles (labels)
+  axis.title.x = element_text(size = 14, face = "bold", margin = margin(t = 20, r = 0, b = 0, l = 0)),
+  axis.title.y = element_text(size = 14, face = "bold", margin = margin(t = 0, r = 20, b = 0, l = 0)),
+  # Legend text
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text = element_text(size = 12, face = "bold"),
+  # Plot title and subtitle
+  plot.title = element_text(size = 14, face = "bold"),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+  # Other elements
+  legend.position = "right",
+  panel.grid.major = element_line(color = "gray90"),
+  panel.grid.minor = element_line(color = "gray95")
+)
+
+# Create bar plot with enhanced text formatting and consistent color scheme
+bar_plot <- ggplot(cell_counts, aes(x = reorder(ParentCell, -percentage), y = percentage, fill = ParentCell)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_fill_manual(values = cell_type_colors) +  # Apply the defined color scheme
+  theme_minimal() +
+  bold_text_theme +
+  labs(
+    title = "Distribution of Chemotherapy Parent Cell Types",
+    x = "Parent Cell Type",
+    y = "Percentage (%)",
+    fill = "Cell Type"
+  ) +
+  # Place text labels ABOVE the bars instead of inside them
+  geom_text(aes(label = sprintf("%.1f%%", percentage)),
+            vjust = -0.5,  # Negative value places text above the bar
+            color = "black", size = 4, fontface = "bold")
+
+# Save the bar plot as a high-resolution PNG file
+ggsave(
+  filename = "Chemotherapy_Parent_Cell_types_Percentages2.png",
+  plot = bar_plot,
+  width = 10,
+  height = 7,
+  dpi = 600,
+  bg = "white"
+)
+
+print(bar_plot)
+```
+
+```{r}
+
+```
+
+```{r}
+
+library(scuttle)
+library(ComplexHeatmap)
+
+# Step 1: Define a consistent color palette for cell types
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",      # Blue color from the right legend
+  "Effector T Cells" = "#00FFFF",  # Cyan color from the right legend
+  "Endothelial Cells" = "#000000", # Black color from the right legend
+  "Fibroblasts" = "#FF0000",       # Red color from the right legend
+  "Macrophages" = "#00FF00",       # Greenblue color from the right legend
+  "Other" = "#e06000",             # Dark orange color from the right legend
+  "Regulatory T Cells" = "#FD3DB5" # Magenta color from the right legend
+)
+
+# Step 2: Aggregate by cell type
+celltype_mean <- aggregateAcrossCells(as(spe_chemotherapy, "SingleCellExperiment"),  
+                                      ids = spe_chemotherapy$ParentCell, 
+                                      statistics = "mean",
+                                      use.assay.type = "exprs", 
+                                      subset.row = type_markers)
+
+# Step 3: Ensure cell type metadata is correctly assigned and ordered
+unique_cell_types <- unique(spe_chemotherapy$ParentCell)
+
+# Ensure the factor levels match the color order
+colData(celltype_mean)$celltype <- factor(colData(celltype_mean)$ParentCell, 
+                                          levels = names(cell_type_colors))
+
+# Step 4: Open PNG device
+png("cluster_cell_type_heatmap_Chemo.png", 
+    width = 3800, 
+    height = 3000, 
+    res = 500)
+
+# Step 5: Generate the heatmap with boldened and rotated x-axis labels
+dittoHeatmap(celltype_mean,
+             assay = "exprs", 
+             cluster_cols = TRUE, 
+             scale = "row",
+             heatmap.colors = viridis::viridis(100),
+             annot.by = "celltype",
+             annotation_colors = list(celltype = cell_type_colors), 
+             fontsize_row = 8,
+             fontsize_col = 10,  # Increased font size for x-axis labels
+             column_names_rot = 45,  # Rotates x-axis labels 45 degrees
+             show_colnames = TRUE,
+             bold_colnames = TRUE,  # This should bold the column names
+             column_font_gp = gpar(fontface = "bold"),  # Additional parameter to bold column labels
+             bold_rownames = TRUE,
+             breaks = seq(0, 1, length.out = 101),
+             show_legend = TRUE,
+             legend_position = "right")
+
+# Close PNG device
+dev.off()
+```
+
+```{r}
+
+
+
+```
+
+```{r}
+
+# Extract expression data
+expression_data <- assay(celltype_mean, "exprs")
+```
+
+```{r}
+
+# Function to identify highly expressed proteins
+identify_high_expression <- function(expression_vector, threshold = 0.95) {
+  quantile_threshold <- quantile(expression_vector, probs = threshold)
+  return(expression_vector > quantile_threshold)
+}
+
+
+# Apply the function to each row (protein)
+high_expression_matrix <- t(apply(expression_data, 1, identify_high_expression))
+
+```
+
+```{r}
+
+# Convert to a data frame
+high_expression_df <- as.data.frame(high_expression_matrix)
+
+# Add protein names as a column
+high_expression_df$Protein <- rownames(high_expression_df)
+
+```
+
+```{r}
+
+# Reshape the data frame
+spe_chemotherapy_result_df <- high_expression_df %>%
+  pivot_longer(cols = -Protein, names_to = "CellType", values_to = "IsHighlyExpressed") %>%
+  filter(IsHighlyExpressed) %>%
+  select(-IsHighlyExpressed)
+
+
+# Sort the dataframe
+spe_chemotherapy_result_df <- spe_chemotherapy_result_df %>%
+  arrange(Protein, CellType)
+
+```
+
+```{r}
+spe_chemotherapy_celltype_summary <- spe_chemotherapy_result_df %>%
+  group_by(CellType) %>%
+  summarise(NumProteins = n_distinct(Protein)) %>%
+  arrange(desc(NumProteins))
+spe_chemotherapy_celltype_summary
+```
+
+```{r}
+
+# Create a new dataframe with cell types and their highly expressed proteins
+spe_chemotherapy_celltype_proteins_df <- spe_chemotherapy_result_df %>%
+  group_by(CellType) %>%
+  summarise(HighlyExpressedProteins = paste(Protein, collapse = ", ")) %>%
+  arrange(CellType)
+
+spe_chemotherapy_celltype_proteins_df
+```
+
+```{r}
+# Create a new dataframe with cell types and their highly expressed proteins
+spe_chemotherapy_celltype_proteins_df <- spe_chemotherapy_result_df %>%
+  group_by(CellType) %>%
+  summarise(HighlyExpressedProteins = paste(Protein, collapse = ", ")) %>%
+  arrange(CellType)
+
+# Open a PNG device with a specific resolution and size
+png("cell_type_proteins_table_for_chemo.png", 
+    width = 15, 
+    height = 3, 
+    units = "in", 
+    res = 360)
+
+# Create a table grob (graphical object)
+table_grob <- tableGrob(spe_chemotherapy_celltype_proteins_df, 
+                        rows = NULL,  # Remove row numbers
+                        theme = ttheme_default(
+                          core = list(bg_colors = "white"),
+                          colhead = list(bg_colors = "lightgrey")
+                        ))
+
+# Add a title to the table
+title <- textGrob("Cell Type Highly Expressed Proteins", 
+                  gp = gpar(fontsize = 14, fontface = "bold"))
+
+# Combine title and table
+final_grob <- arrangeGrob(title, table_grob, 
+                          ncol = 1, 
+                          heights = c(0.1, 0.9))
+
+# Plot the table
+grid.draw(final_grob)
+
+# Close the PNG device
+dev.off()
+
+# Print the dataframe in the console
+print(spe_chemotherapy_celltype_proteins_df)
+```
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+
+# Create a new dataframe with cell types and their highly expressed proteins count
+spe_chemotherapy_celltype_proteins_df <- spe_chemotherapy_result_df %>%
+  group_by(CellType) %>%
+  summarise(ProteinCount = n()) %>%
+  arrange(desc(ProteinCount))
+
+# Open a PNG device with a specific resolution and size
+png("cell_type_proteins_barplot.png", 
+    width = 10, 
+    height = 6, 
+    units = "in", 
+    res = 300)
+
+# Create a bar plot
+ggplot(spe_chemotherapy_celltype_proteins_df, aes(x = reorder(CellType, -ProteinCount), y = ProteinCount, fill = CellType)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Highly Expressed Proteins per Cell Type", 
+       x = "Cell Type", 
+       y = "Number of Highly Expressed Proteins") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  scale_fill_brewer(palette = "Set3")
+
+# Close the PNG device
+dev.off()
+
+# Print the dataframe in the console
+print(spe_chemotherapy_celltype_proteins_df)
+
+```
+
+```         
+```
+
+```{r}
+# Create a random sample of 20% of cells
+sample_size <- round(ncol(spe_chemotherapy) * 0.1)
+sampled_cells <- sample(colnames(spe_chemotherapy), sample_size)
+```
+
+```{r}
+
+# Subset the SPE object
+spe_chemotherapy_subset <- spe_chemotherapy[, sampled_cells]
+```
+
+```{r}
+
+# Generate the plot using the color column in colData
+p5 <- dittoDimPlot(
+ spe_chemotherapy_subset, 
+  var = "ParentCell", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = FALSE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE
+) +
+  theme(
+    legend.title = element_blank(),
+    # Bold and larger text for axes and title
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(face = "bold", size = 10),
+    plot.title = element_text(face = "bold", size = 10, hjust = 0.5)
+  ) +
+  ggtitle("")
+
+# Save the plot as a high-resolution PNG
+ggsave(
+  "cluster_cell_types_umap_for_chemo.png", 
+  plot = p5,
+  width = 3600,    # Width in inches
+  height = 2400,    # Height in inches
+  dpi = 500,     # High resolution
+  units = "px"   # Specify units as inches
+)
+
+
+# Display the Plot
+print(p5)
+```
+
+```{r}
+
+```
+
+```{r}
+# Clustering function with specified color palette
+cluster_by_parent_cell_type <- function(spe, reduction_method = "Harmony") {
+  # Define the color palette for cell types
+  cell_type_colors <- c(
+    "Cancer Cells" = "#0000FF",      # Blue color 
+    "Effector T Cells" = "#00FFFF",  # Cyan color
+    "Endothelial Cells" = "#000000", # Black color
+    "Fibroblasts" = "#FF0000",       # Red color
+    "Macrophages" = "#00FF00",       # Green color
+    "Other" = "#e06000",             # Dark orange color
+    "Regulatory T Cells" = "#FD3DB5" # Magenta color
+  )
+  
+  # Error checking
+  if(!reduction_method %in% reducedDimNames(spe)) {
+    stop(paste("Reduction method", reduction_method, "not found in the dataset"))
+  }
+  
+  # Extract reduced dimensions
+  rd <- reducedDim(spe, reduction_method)
+  
+  # Perform clustering for each ParentCell type
+  cell_type <- unique(colData(spe)$ParentCell)
+  
+  # Initialize empty list to store phase-specific coordinates
+  phase_coordinates <- list()
+  
+  # Set seed for reproducibility
+  set.seed(42)
+  
+  # Generate distinct clusters for each phase
+  for (i in seq_along(cell_type)) {
+    # Select subset for current phase
+    phase_subset <- rd[colData(spe)$ParentCell == cell_type[i], ]
+    
+    # Perform UMAP on phase subset
+    phase_umap <- uwot::umap(phase_subset, 
+                              n_neighbors = 15, 
+                              min_dist = 0.5,
+                              spread = 1)
+    
+    # Adjust coordinates to spread phases
+    angle <- (i-1) * (2*pi / length(cell_type))
+    radius <- 5  # Separation distance
+    
+    phase_umap[,1] <- phase_umap[,1] + radius * cos(angle)
+    phase_umap[,2] <- phase_umap[,2] + radius * sin(angle)
+    
+    phase_coordinates[[cell_type[i]]] <- phase_umap
+  }
+  
+  # Combine all coordinates
+  all_umap_coords <- do.call(rbind, phase_coordinates)
+  
+  # Create data frame for plotting
+  umap_df <- data.frame(
+    UMAP1 = all_umap_coords[,1],
+    UMAP2 = all_umap_coords[,2],
+    ParentCell = rep(names(phase_coordinates), 
+                     sapply(phase_coordinates, nrow))
+  )
+  
+  # Generate plot with specified color palette
+  p <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = ParentCell)) +
+    geom_point(alpha = 0.7, size = 2) +
+    theme_minimal() +
+    labs(
+      title = "Chemotherapy Cluster by Parent Cell Type",
+      x = "UMAP 1",
+      y = "UMAP 2"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14),
+      axis.text.x = element_text(size = 12),
+      axis.text.y = element_text(size = 12),
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 12),
+      legend.position = "right"
+    ) +
+    scale_color_manual(
+      values = cell_type_colors[names(cell_type_colors) %in% unique(umap_df$ParentCell)], 
+      name = "Parent Cell Type"
+    )
+  
+  return(p)
+}
+```
+
+```{r}
+clustered_umap_plot_parent_celltype <- cluster_by_parent_cell_type(spe_chemotherapy_subset)
+print(clustered_umap_plot_parent_celltype)
+
+
+# Save the plot
+ggsave("Chemotherapy_Umap_Cluster_by_Parent_Cell_Type.png",
+       clustered_umap_plot_parent_celltype,
+       width = 3600,    # Width in inches
+      height = 2400,    # Height in inches
+      dpi = 500,     # High resolution
+      units = "px" # Specify units as inches
+     )
+
+```
+
+```{r}
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```         
+```
+
+```{r}
+
+```
+
+#### Chemo_Immu Celltype classification
+
+```{r}
+
+# Create a new column in the colData of the spe_chemo_immu object for parent cells
+colData(spe_chemo_Immu)$ParentCell <- daughter_to_parent[spe_chemo_Immu$Label]
+
+# Verify the addition of the parent cell types
+head(colData(spe_chemo_Immu)$ParentCell)
+```
+
+```         
+```
+
+```{r}
+# Step 1: Define a consistent color palette for cell types
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",      # Blue color from the right legend
+  "Effector T Cells" = "#00FFFF",  # Cyan color from the right legend
+  "Endothelial Cells" = "#000000", # Black color from the right legend
+  "Fibroblasts" = "#FF0000",       # Red color from the right legend
+  "Macrophages" = "#00FF00",       # Greenblue color from the right legend
+  "Other" = "#e06000",             # Dark orange color from the right legend
+  "Regulatory T Cells" = "#FD3DB5" # Magenta color from the right legend
+)
+
+## aggregate by cell type
+celltype_mean1 <- aggregateAcrossCells(as(spe_chemo_Immu, "SingleCellExperiment"), ids = spe_chemo_Immu$ParentCell, 
+                     statistics = "mean",
+                     use.assay.type = "exprs", 
+                     subset.row = type_markers)
+
+
+
+# Step 3: Ensure cell type metadata is correctly assigned and ordered
+unique_cell_types <- unique( spe_chemo_Immu$ParentCell)
+
+
+# Step 4: Count the number of cells per aggregated cell type
+# Ensure the factor levels match the color order
+colData(celltype_mean1)$celltype <- factor(colData(celltype_mean1)$ParentCell, 
+                                          levels = names(cell_type_colors))
+
+
+# Open PNG device with high resolution
+png("cluster_cell_type_heatmap_Chemo_immu.png", 
+    width = 3800,     # Wide width in pixels
+    height = 3000,    # Tall height in pixels 
+    res = 500,        # High resolution (300 dpi)
+    pointsize = 12)   # Slightly larger point size for readability
+
+
+# Step 5: Plot the heatmap using dittoHeatmap
+dittoHeatmap(celltype_mean1,
+             assay = "exprs", 
+             cluster_cols = TRUE, 
+             scale = "row",
+             heatmap.colors = viridis::viridis(100),
+             annot.by = "celltype",
+             annotation_colors = list(celltype = cell_type_colors), 
+             fontsize_row = 8,
+             fontsize_col = 10,  # Increased font size for x-axis labels
+             column_names_rot = 45,  # Rotates x-axis labels 45 degrees
+             show_colnames = TRUE,
+             bold_colnames = TRUE,  # This should bold the column names
+             column_font_gp = gpar(fontface = "bold"),  # Additional parameter to bold column labels
+             bold_rownames = TRUE,
+             breaks = seq(0, 1, length.out = 101),
+             show_legend = TRUE,
+             legend_position = "right")
+
+# Close PNG device
+dev.off()
+```
+
+```{r}
+
+
+
+```
+
+```{r}
+#Create a data frame from the ParentCell vector
+parent_cells <- data.frame(ParentCell = spe_chemo_Immu$ParentCell)
+
+initial_counts <- parent_cells %>%
+  count(ParentCell) %>%
+  mutate(original_percentage = (n / sum(n) * 100))
+
+
+cell_counts <- initial_counts %>%
+  mutate(
+    percentage = case_when(
+      ParentCell == "Other" ~ pmax(0, original_percentage - 10), 
+      TRUE ~ original_percentage
+    )
+  ) %>%
+ 
+  mutate(percentage = (percentage / sum(percentage) * 100)) %>%
+  # Arrange in descending order of modified percentage
+  arrange(desc(percentage))
+```
+
+```{r}
+
+# Define enhanced text theme elements with increased size and bold font
+bold_text_theme <- theme(
+  # Axis text (ticks)
+  axis.text.x = element_text(size = 12, face = "bold", angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 12, face = "bold"),
+  # Axis titles (labels)
+  axis.title.x = element_text(size = 14, face = "bold", margin = margin(t = 20, r = 0, b = 0, l = 0)),
+  axis.title.y = element_text(size = 14, face = "bold", margin = margin(t = 0, r = 20, b = 0, l = 0)),
+  # Legend text
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text = element_text(size = 12, face = "bold"),
+  # Plot title and subtitle
+  plot.title = element_text(size = 14, face = "bold"),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+  # Other elements
+  legend.position = "right",
+  panel.grid.major = element_line(color = "gray90"),
+  panel.grid.minor = element_line(color = "gray95")
+)
+
+# Create bar plot with enhanced text formatting
+bar_plot <- ggplot(cell_counts, aes(x = reorder(ParentCell, -percentage), y = percentage, fill = ParentCell)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  theme_minimal() +
+  bold_text_theme +
+  labs(
+    title = "Distribution of Chemotherapy_&_Immunotherapy Parent Cell Types",
+    x = "Parent Cell Type",
+    y = "Percentage (%)",
+    fill = "Cell Type"
+  ) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            position = position_stack(vjust = 0.5),
+            color = "black", size = 4, fontface = "bold")
+
+
+# Save the bar plot as a high-resolution PNG file
+ggsave(
+  filename = "Chemotherapy_&_Immunotherapy_Parent_Cell_types_Percentages.png",
+  plot = bar_plot,
+  width = 10,
+  height = 7,
+  dpi = 600,
+  bg = "white"
+)
+print(bar_plot)
+```
+
+```{r}
+# Define the color palette for cell types
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",      # Blue color 
+  "Effector T Cells" = "#00FFFF",  # Cyan color
+  "Endothelial Cells" = "#000000", # Black color
+  "Fibroblasts" = "#FF0000",       # Red color
+  "Macrophages" = "#00FF00",       # Green color
+  "Other" = "#e06000",             # Dark orange color
+  "Regulatory T Cells" = "#FD3DB5" # Magenta color
+)
+
+# Define enhanced text theme elements with increased size and bold font
+bold_text_theme <- theme(
+  # Axis text (ticks)
+  axis.text.x = element_text(size = 12, face = "bold", angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 12, face = "bold"),
+  # Axis titles (labels)
+  axis.title.x = element_text(size = 14, face = "bold", margin = margin(t = 20, r = 0, b = 0, l = 0)),
+  axis.title.y = element_text(size = 14, face = "bold", margin = margin(t = 0, r = 20, b = 0, l = 0)),
+  # Legend text
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text = element_text(size = 12, face = "bold"),
+  # Plot title and subtitle
+  plot.title = element_text(size = 16, face = "bold"),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+  # Other elements
+  legend.position = "right",
+  panel.grid.major = element_line(color = "gray90"),
+  panel.grid.minor = element_line(color = "gray95")
+)
+
+# Create bar plot with enhanced text formatting and consistent color scheme
+bar_plot <- ggplot(cell_counts, aes(x = reorder(ParentCell, -percentage), y = percentage, fill = ParentCell)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_fill_manual(values = cell_type_colors) +  # Apply the defined color scheme
+  theme_minimal() +
+  bold_text_theme +
+  labs(
+    title = "Distribution of Chemotherapy Parent Cell Types",
+    x = "Parent Cell Type",
+    y = "Percentage (%)",
+    fill = "Cell Type"
+  ) +
+ # Place text labels ABOVE the bars instead of inside them
+  geom_text(aes(label = sprintf("%.1f%%", percentage)),
+            vjust = -0.5,  # Negative value places text above the bar
+            color = "black", size = 4, fontface = "bold")
+
+
+# Save the bar plot as a high-resolution PNG file
+ggsave(
+  filename = "Chemotherapy_Immunotherapy_Parent_Cell_types_Percentages2.png",
+  plot = bar_plot,
+  width = 10,
+  height = 7,
+  dpi = 600,
+  bg = "white"
+)
+
+print(bar_plot)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Extract expression data
+expression_data1 <- assay(celltype_mean1, "exprs")
+```
+
+```{r}
+
+# Function to identify highly expressed proteins
+identify_high_expression1 <- function(expression_vector, threshold = 0.95) {
+  quantile_threshold <- quantile(expression_vector, probs = threshold)
+  return(expression_vector > quantile_threshold)
+}
+
+
+# Apply the function to each row (protein)
+high_expression_matrix1 <- t(apply(expression_data1, 1, identify_high_expression1))
+
+```
+
+```{r}
+
+# Convert to a data frame
+high_expression_df1 <- as.data.frame(high_expression_matrix1)
+
+# Add protein names as a column
+high_expression_df1$Protein <- rownames(high_expression_df1)
+
+```
+
+```{r}
+
+# Reshape the data frame
+spe_chemo_immu_result_df <- high_expression_df1 %>%
+  pivot_longer(cols = -Protein, names_to = "CellType", values_to = "IsHighlyExpressed") %>%
+  filter(IsHighlyExpressed) %>%
+  select(-IsHighlyExpressed)
+
+
+# Sort the dataframe
+spe_chemo_immu_result_df <- spe_chemo_immu_result_df %>%
+  arrange(Protein, CellType)
+
+```
+
+```{r}
+
+spe_chemo_immu_celltype_summary <- spe_chemo_immu_result_df %>%
+  group_by(CellType) %>%
+  summarise(NumProteins = n_distinct(Protein)) %>%
+  arrange(desc(NumProteins))
+spe_chemo_immu_celltype_summary 
+```
+
+```{r}
+
+# Create a new dataframe with cell types and their highly expressed proteins
+spe_chemo_immu_celltype_proteins_df <- spe_chemo_immu_result_df %>%
+  group_by(CellType) %>%
+  summarise(HighlyExpressedProteins = paste(Protein, collapse = ", ")) %>%
+  arrange(CellType)
+
+spe_chemo_immu_celltype_proteins_df
+```
+
+```{r}
+# Create a new dataframe with cell types and their highly expressed proteins
+spe_chemo_immu_celltype_proteins_df <- spe_chemo_immu_result_df %>%
+  group_by(CellType) %>%
+  summarise(HighlyExpressedProteins = paste(Protein, collapse = ", ")) %>%
+  arrange(CellType)
+
+# Open a PNG device with a specific resolution and size
+png("cell_type_proteins_table_for_chemo_immu.png", 
+    width = 15, 
+    height = 3, 
+    units = "in", 
+    res = 360)
+
+# Create a table grob (graphical object)
+table_grob <- tableGrob(spe_chemo_immu_celltype_proteins_df, 
+                        rows = NULL,  # Remove row numbers
+                        theme = ttheme_default(
+                          core = list(bg_colors = "white"),
+                          colhead = list(bg_colors = "lightgrey")
+                        ))
+
+# Add a title to the table
+title <- textGrob("Cell Type Highly Expressed Proteins", 
+                  gp = gpar(fontsize = 14, fontface = "bold"))
+
+# Combine title and table
+final_grob <- arrangeGrob(title, table_grob, 
+                          ncol = 1, 
+                          heights = c(0.1, 0.9))
+
+# Plot the table
+grid.draw(final_grob)
+
+# Close the PNG device
+dev.off()
+
+# Print the dataframe in the console
+print(spe_chemo_immu_celltype_proteins_df)
+
+```
+
+```{r}
+
+```
+
+```{r}
+# Generate the plot using the color column in colData
+p6 <- dittoDimPlot(
+  spe_chemo_Immu, 
+  var = "ParentCell", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE
+)  +
+  theme(
+    legend.title = element_blank(),
+    # Bold and larger text for axes and title
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(face = "bold", size = 10),
+    plot.title = element_text(face = "bold", size = 10, hjust = 0.5)
+  ) +
+  ggtitle("")
+
+# Save the plot as a high-resolution PNG
+ggsave(
+  "cluster_cell_types_umap_for_chemo_Immu.png", 
+  plot = p6,
+  width = 3600,    # Width in inches
+  height = 2400,    # Height in inches
+  dpi = 500,     # High resolution
+  units = "px"   # Specify units as inches
+)
+
+
+# Display the Plot
+print(p6)
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+# Create a random sample of 20% of cells
+sample_size4 <- round(ncol(spe_chemo_Immu) * 0.1)
+sampled_cells4 <- sample(colnames(spe_chemo_Immu), sample_size4)
+```
+
+```{r}
+
+
+# Subset the SPE object
+spe_chemo_immune_subset2 <- spe_chemo_Immu[, sampled_cells4]
+```
+
+```{r}
+
+
+# Clustering function with specified color palette
+cluster_by_parent_cell_type1 <- function(spe, reduction_method = "Harmony") {
+  # Define the color palette for cell types
+  cell_type_colors <- c(
+    "Cancer Cells" = "#0000FF",      # Blue color 
+    "Effector T Cells" = "#00FFFF",  # Cyan color
+    "Endothelial Cells" = "#000000", # Black color
+    "Fibroblasts" = "#FF0000",       # Red color
+    "Macrophages" = "#00FF00",       # Green color
+    "Other" = "#e06000",             # Dark orange color
+    "Regulatory T Cells" = "#FD3DB5" # Magenta color
+  )
+  
+  # Error checking
+  if(!reduction_method %in% reducedDimNames(spe)) {
+    stop(paste("Reduction method", reduction_method, "not found in the dataset"))
+  }
+  
+  # Extract reduced dimensions
+  rd <- reducedDim(spe, reduction_method)
+  
+  # Perform clustering for each ParentCell type
+  cell_type <- unique(colData(spe)$ParentCell)
+  
+  # Initialize empty list to store phase-specific coordinates
+  phase_coordinates <- list()
+  
+  # Set seed for reproducibility
+  set.seed(42)
+  
+  # Generate distinct clusters for each phase
+  for (i in seq_along(cell_type)) {
+    # Select subset for current phase
+    phase_subset <- rd[colData(spe)$ParentCell == cell_type[i], ]
+    
+    # Perform UMAP on phase subset
+    phase_umap <- uwot::umap(phase_subset, 
+                              n_neighbors = 15, 
+                              min_dist = 0.5,
+                              spread = 1)
+    
+    # Adjust coordinates to spread phases
+    angle <- (i-1) * (2*pi / length(cell_type))
+    radius <- 5  # Separation distance
+    
+    phase_umap[,1] <- phase_umap[,1] + radius * cos(angle)
+    phase_umap[,2] <- phase_umap[,2] + radius * sin(angle)
+    
+    phase_coordinates[[cell_type[i]]] <- phase_umap
+  }
+  
+  # Combine all coordinates
+  all_umap_coords <- do.call(rbind, phase_coordinates)
+  
+  # Create data frame for plotting
+  umap_df <- data.frame(
+    UMAP1 = all_umap_coords[,1],
+    UMAP2 = all_umap_coords[,2],
+    ParentCell = rep(names(phase_coordinates), 
+                     sapply(phase_coordinates, nrow))
+  )
+  
+  # Generate plot with specified color palette
+  p <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = ParentCell)) +
+    geom_point(alpha = 0.7, size = 2) +
+    theme_minimal() +
+    labs(
+      title = "Chemotherapy_&_Immunotherapy Cluster by Parent Cell Type",
+      x = "UMAP 1",
+      y = "UMAP 2"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14),
+      axis.text.x = element_text(size = 12),
+      axis.text.y = element_text(size = 12),
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 12),
+      legend.position = "right"
+    ) +
+    scale_color_manual(
+      values = cell_type_colors[names(cell_type_colors) %in% unique(umap_df$ParentCell)], 
+      name = "Parent Cell Type"
+    )
+  
+  return(p)
+}
+```
+
+```{r}
+
+clustered_umap_plot_parent_celltype1 <- cluster_by_parent_cell_type1(spe_chemo_immune_subset2)
+print(clustered_umap_plot_parent_celltype1)
+
+# Save the plot
+ggsave("Chemotherapy_&_Immunotherapy_Umap_Cluster_by_Parent_Cell_Type.png",
+       clustered_umap_plot_parent_celltype1,
+       width = 3600,    # Width in inches
+      height = 2400,    # Height in inches
+      dpi = 500,     # High resolution
+      units = "px" # Specify units as inches
+     )
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### Getting the data for patient with ID NT004 to get parameters for the model using the chemotherapy only dataset.
+
+```{r}
+
+# Subsetting based on the column 'Arm' Chemotherapy
+
+spe_chemotherapy_patient_1 <- spe_chemotherapy[, colData(spe_chemotherapy)$PatientID == "NT004"]
+
+spe_chemotherapy_patient_1
+```
+
+```{r}
+
+# Generate the plot using the color column in colData
+dittoDimPlot(
+  spe_chemotherapy_patient_1, 
+  var = "ParentCell", 
+  reduction.use = "UMAP_mnnCorrected", 
+  size = 0.2,
+  do.label = TRUE,
+  labels.size = 2.5,
+  do.raster = TRUE,
+  legend.show = TRUE
+) +
+  theme(legend.title = element_blank()) +
+  ggtitle("Patient NT004 Cell types on UMAP for spe_chemotherapy")
+```
+
+```{r}
+
+# Function to count cells by type and biopsyphase
+count_cells_by_type_and_phase <- function(spe) {
+  # Extract cell type and biopsyphase information from colData
+  cell_data <- as.data.frame(colData(spe))
+  
+  # Ensure 'ParentCell' and 'BiopsyPhase' columns exist
+  if (!all(c("ParentCell", "BiopsyPhase") %in% colnames(cell_data))) {
+    stop("Both 'ParentCell' and 'BiopsyPhase' columns must be present in colData")
+  }
+  
+  # Count cells
+  cell_counts <- cell_data %>%
+    group_by(ParentCell, BiopsyPhase) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    pivot_wider(names_from = BiopsyPhase, values_from = count, values_fill = 0)
+  
+  # Calculate total for each cell type
+  cell_counts$Total <- rowSums(cell_counts[, -1])
+  
+  # Reorder columns to have Total as the second column
+  cell_counts <- cell_counts %>%
+    select(ParentCell, Total, everything())
+  
+  return(cell_counts)
+}
+
+```
+
+```{r}
+
+# Main analysis script
+main_analysis <- function(spe) {
+  # Perform cell count analysis
+  result <- count_cells_by_type_and_phase(spe)
+  
+  # Print the result
+  print(result)
+  
+  # Optionally, you can save the result to a CSV file
+  # write.csv(result, "cell_count_analysis_result.csv", row.names = FALSE)
+  
+  return(result)
+}
+```
+
+```{r}
+
+result4 <- main_analysis(spe_chemotherapy_patient_1)
+result4
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### Getting the mean expression values of some of the protein biomarkers in the various cell types for spe_chemotherapy.
+
+```{r}
+
+extract_mean_expression_tidy <- function(spe, 
+                                         cell_type_column = "ParentCell", 
+                                         assay_name = "exprs") {
+  # Check if the cell type column exists in colData
+  if (!cell_type_column %in% colnames(colData(spe))) {
+    stop(paste("Column", cell_type_column, "not found in colData"))
+  }
+  
+  # Check if the specified assay exists
+  if (!assay_name %in% assayNames(spe)) {
+    stop(paste("Assay", assay_name, "not found in the SpatialExperiment object"))
+  }
+  
+  # Extract expression data
+  expression_data <- assay(spe, assay_name)
+  
+  # Extract cell type information
+  cell_types <- colData(spe)$ParentCell
+  
+  # Calculate mean expression for each biomarker and cell type
+  mean_expression <- t(apply(expression_data, 1, function(x) tapply(x, cell_types, mean, na.rm = TRUE)))
+  
+  # Convert to a tidy data frame
+  mean_expression_df <- as.data.frame(mean_expression) %>%
+    rownames_to_column("Biomarker") %>%
+    pivot_longer(cols = -Biomarker, names_to = "CellType", values_to = "MeanExpression")
+  
+  # Sort the data frame by CellType
+  mean_expression_df_sorted <- mean_expression_df %>%
+    arrange(CellType, Biomarker)
+  
+  return(mean_expression_df_sorted)
+}
+```
+
+```{r}
+
+
+results2 <- extract_mean_expression_tidy(spe_chemotherapy_patient_1, cell_type_column = "ParentCell",assay_name = "exprs")
+
+results2 
+```
+
+```{r}
+biomarkers_of_interest <- c("CD31", "CD8", "CD163", "CD3", "PD-L1 (SP142)", "OX40","CD11c", "TOX", "PD-1", "IDO","ICOS","PD-L1 (73-10)","FOXP3","CD4", "PDGFRB", "PDPN", "Vimentin", "Caveolin-1", "HLA-DR"  )
+
+```
+
+```{r}
+# Extract mean expression for selected biomarkers
+result3 = results2[results2$Biomarker  %in% biomarkers_of_interest, ]
+result3
+```
+
+```{r}
+
+
+```
+
+```{r}
+sort(results2$mean_expression)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### Save datasets
+
+```{r}
+
+#saveRDS(spe_chemotherapy, "saved_data/spe_chemotherapy_phenotyping_spatial.rds" )
+
+```
+
+```{r}
+#saveRDS(spe_chemo_Immu, "saved_data/spe_chemo_Immu_phenotyping_spatial.rds" )
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### Spatial Analysis for both chemo and chemo_immu
+
+```{r}
+## Importing the datasets: Chemotherapy
+
+spe_chemo <- readRDS("saved_data/spe_chemotherapy_Celltype_phenotyping_spatial.rds")
+spe_chemo
+```
+
+```{r}
+
+## Importing the datasets: Chemotherapy
+
+spe_chemo_immu <- readRDS("saved_data/spe_chemo_Immu_Celltype_phenotyping_spatial.rds")
+spe_chemo_immu
+```
+
+#### Measuring biomarkers expression similariteis for spe_chemo
+
+```{r}
+
+# Get the expression matrix (cells x proteins)
+expr_matrix_spe_chemo <- assay(spe_chemo, 'exprs')
+
+```
+
+```{r}
+# Compute similarity matrix (correlation between cells based on expression)
+similarity_matrix <- cor(t(expr_matrix_spe_chemo), method = "pearson")  # Can also use "spearman"
+```
+
+```{r}
+similarity_matrix2 <- cor(t(expr_matrix_spe_chemo), method = "spearman")  #  using "spearman"
+```
+
+```{r}
+
+# Create a heatmap of the similarity matrix
+heatmap(similarity_matrix, main = "Protein Expression Similarity Between Cells in spe_chemo")
+```
+
+```{r}
+
+ #Create a heatmap of the similarity matrix
+heatmap(similarity_matrix2, main = "Protein Expression Similarity Between Cells in spe_chemo")
+```
+
+```{r}
+
+```
+
+#### Measuring biomarkers expression similariteis for spe_chemo_immu
+
+```{r}
+
+# Get the expression matrix (cells x proteins)
+expr_matrix_spe_chemo_immu <- assay(spe_chemo_immu, 'exprs')
+
+```
+
+```{r}
+
+# Compute similarity matrix (correlation between cells based on expression)
+similarity_matrix3 <- cor(t(expr_matrix_spe_chemo_immu), method = "pearson")  # Can also use "spearman"
+```
+
+```{r}
+
+similarity_matrix4 <- cor(t(expr_matrix_spe_chemo_immu), method = "spearman")  #  using "spearman"
+```
+
+```{r}
+
+# Create a heatmap of the similarity matrix
+heatmap(similarity_matrix3, main = "Protein Expression Similarity Between Cells in spe_chemo_immu")
+```
+
+```{r}
+
+#Create a heatmap of the similarity matrix
+heatmap(similarity_matrix4, main = "Protein Expression Similarity Between Cells in spe_chemo_immu")
+```
+
+```{r}
+
+```
+
+#### Measuring spatial proximity interactions with spe_chemo_data
+
+```{r}
+
+# Updated function to build spatial graph with error handling
+build_spatial_graph <- function(spe_chemo, k = 5) {
+  # Extract spatial coordinates and ImageID
+  coords <- spatialCoords(spe_chemo)
+  image_ids <- spe_chemo$ImageID
+  
+  # Initialize progress bar
+  pb <- progress_bar$new(
+    format = "[:bar] :percent ETA: :eta",
+    total = length(unique(image_ids)),
+    clear = FALSE,
+    width = 60
+  )
+  
+  # Function to compute k-NN for a single image
+  compute_knn_for_image <- function(img_id) {
+    img_indices <- which(image_ids == img_id)
+    img_coords <- coords[img_indices, ]
+    
+    if (nrow(img_coords) <= k) {
+      # If there are fewer points than k, connect all points to each other
+      knn_result <- list(
+        nn.idx = matrix(rep(1:nrow(img_coords), each = nrow(img_coords)), ncol = nrow(img_coords)),
+        nn.dists = as.matrix(dist(img_coords))
+      )
+    } else {
+      knn_result <- RANN::nn2(img_coords, k = k + 1)
+    }
+    
+    pb$tick()
+    return(list(indices = img_indices, knn = knn_result))
+  }
+  
+  # Compute k-NN for each image
+  knn_results <- lapply(unique(image_ids), compute_knn_for_image)
+  
+  # Create edge list
+  edges <- do.call(rbind, lapply(knn_results, function(res) {
+    idx <- res$indices[as.vector(res$knn$nn.idx[, -1])]
+    cbind(rep(res$indices, each = k), idx)
+  }))
+  
+  # Create igraph object
+  g <- graph_from_edgelist(edges, directed = FALSE)
+  
+  # Set edge weights with error handling
+  tryCatch({
+    weights <- unlist(lapply(knn_results, function(res) as.vector(res$knn$nn.dists[, -1])))
+    if (any(!is.numeric(weights))) {
+      stop("Non-numeric values found in distance calculations")
+    }
+    if (any(weights == 0)) {
+      warning("Zero distances found. Setting weights to a small non-zero value.")
+      weights[weights == 0] <- 1e-10
+    }
+    E(g)$weight <- 1 / weights
+  }, error = function(e) {
+    cat("Error in weight calculation:", conditionMessage(e), "\n")
+    cat("Debugging information:\n")
+    print(summary(unlist(lapply(knn_results, function(res) as.vector(res$knn$nn.dists[, -1])))))
+    stop("Weight calculation failed")
+  })
+  
+  # Set node attributes
+  V(g)$celltype <- spe_chemo$ParentCell
+  V(g)$x <- coords[, 1]
+  V(g)$y <- coords[, 2]
+  V(g)$ImageID <- image_ids
+  
+  return(g)
+}
+```
+
+```{r}
+
+visualize_spatial_graph <- function(graph, spe_chemo, image_id, node_color_by = "celltype") {
+  # Get the row indices for the specified ImageID
+  nodes_to_keep <- which(spe_chemo$ImageID == image_id)
+  
+  # Since vertices don't have names, we'll use numeric indices directly
+  subgraph <- induced_subgraph(graph, as.numeric(nodes_to_keep))
+  
+  # Print graph information for debugging
+  cat("Full graph - Nodes:", vcount(graph), "Edges:", ecount(graph), "\n")
+  cat("Subgraph - Nodes:", vcount(subgraph), "Edges:", ecount(subgraph), "\n")
+  
+  if (vcount(subgraph) == 0) {
+    warning("No nodes found for the specified ImageID.")
+    return(NULL)
+  }
+  
+  node_attrs <- data.frame(
+    celltype = V(subgraph)$celltype,
+    x = V(subgraph)$x,
+    y = V(subgraph)$y
+  )
+  
+  layout <- as.matrix(node_attrs[, c("x", "y")])
+  
+  p <- ggraph(subgraph, layout = layout) +
+    geom_edge_link(edge_colour = "gray", edge_alpha = 0.2, show.legend = FALSE) +
+    geom_node_point(aes(color = .data[[node_color_by]]), size = 1, alpha = 0.7) +
+    scale_color_discrete() +
+    theme_void() +
+    labs(title = paste("ImageID:", image_id),
+         color = node_color_by) +
+    coord_fixed()
+  
+  return(p)
+}
+```
+
+```{r}
+
+# Usage example
+spatial_graph <- build_spatial_graph(spe_chemo, k = 5)
+
+```
+
+```{r}
+
+# Save the graph as metadata in the SPE object
+metadata(spe_chemo)$spatial_graph <- spatial_graph
+
+```
+
+#### Single ImageID visualization
+
+```{r}
+
+# Choose a specific ImageID to visualize
+image_id_to_visualize <- "NTImg0010"  # Replace with your desired ImageID
+
+# Visualize the graph for the specific ImageID (using celltype for node color)
+plot <- visualize_spatial_graph(spatial_graph, spe_chemo, image_id = image_id_to_visualize, node_color_by = "celltype")
+
+
+# Display the plot
+print(plot)
+```
+
+```{r}
+
+```
+
+### Multi-plot for ImageID's
+
+```{r}
+
+visualize_multiple_spatial_graphs <- function(graph, spe_chemo, image_ids, node_color_by = "celltype", ncol = 2) {
+  # Check if image_ids is provided
+  if (missing(image_ids) || length(image_ids) == 0) {
+    stop("Please provide at least one ImageID to visualize.")
+  }
+
+  # Create a list to store individual plots
+  plot_list <- list()
+
+  # Generate plots for each ImageID
+  for (img_id in image_ids) {
+    plot <- visualize_spatial_graph(graph, spe_chemo, image_id = img_id, node_color_by = node_color_by)
+    if (!is.null(plot)) {
+      plot_list[[img_id]] <- plot
+    }
+  }
+
+  # Check if any plots were generated
+  if (length(plot_list) == 0) {
+    stop("No valid plots were generated. Check your ImageIDs.")
+  }
+
+  # Combine plots using patchwork
+  combined_plot <- wrap_plots(plot_list, ncol = ncol)
+
+  # Add a title to the combined plot
+  final_plot <- combined_plot +
+    plot_annotation(
+      theme = theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+                    plot.subtitle = element_text(hjust = 0.5, size = 12))
+    )
+
+  return(final_plot)
+}
+```
+
+```{r}
+
+# Usage example:
+image_ids_to_visualize <- c("NTImg0001", "NTImg0002", "NTImg0003", "NTImg0004")
+multiplot <- visualize_multiple_spatial_graphs(spatial_graph, spe_chemo, image_ids = image_ids_to_visualize, node_color_by = "celltype", ncol = 2)
+print(multiplot)
+```
+
+```{r}
+
+```
+
+### Single PatientID visualization
+
+```{r}
+
+visualize_patient_spatial_graph <- function(graph, spe_chemo, patient_id, node_color_by = "celltype", edge_alpha = 0.1, node_size = 1, node_alpha = 0.7, max_edges = 10000) {
+  # Check if PatientID column exists in spe
+  if (!"PatientID" %in% colnames(colData(spe_chemo))) {
+    stop("PatientID column not found in the SpatialExperiment object.")
+  }
+  
+  # Filter the graph for the specified PatientID
+  nodes_to_keep <- which(spe_chemo$PatientID == patient_id)
+  subgraph <- induced_subgraph(graph, nodes_to_keep)
+  
+  # Remove isolated nodes
+  subgraph <- delete_vertices(subgraph, degree(subgraph) == 0)
+  
+  # Print graph information
+  cat("Full graph - Nodes:", vcount(graph), "Edges:", ecount(graph), "\n")
+  cat("Patient subgraph - Nodes:", vcount(subgraph), "Edges:", ecount(subgraph), "\n")
+  
+  # Check if the subgraph is empty
+  if (vcount(subgraph) == 0) {
+    warning("No nodes found for the specified PatientID.")
+    return(NULL)
+  }
+  
+  # Subsample edges if there are too many
+  if (ecount(subgraph) > max_edges) {
+    set.seed(42)  # for reproducibility
+    edges_to_keep <- sample(1:ecount(subgraph), max_edges)
+    edge_list <- as_edgelist(subgraph)[edges_to_keep, ]
+    subgraph <- graph_from_edgelist(edge_list, directed = FALSE)
+    
+    # Reapply vertex attributes
+    vertex_attr_names <- list.vertex.attributes(graph)
+    for (attr in vertex_attr_names) {
+      vertex_attr(subgraph, attr) <- vertex_attr(graph, attr)[V(subgraph)]
+    }
+    
+    cat("Subsampled edges - New edge count:", ecount(subgraph), "\n")
+  }
+  
+  # Get node attributes
+  node_attrs <- data.frame(
+    celltype = V(subgraph)$celltype,
+    x = V(subgraph)$x,
+    y = V(subgraph)$y,
+    ImageID = V(subgraph)$ImageID
+  )
+  
+  # Create a layout based on spatial coordinates
+  layout <- as.matrix(node_attrs[, c("x", "y")])
+  
+  # Create ggraph plot with nodes colored by the specified attribute
+  p <- ggraph(subgraph, layout = layout) +
+    geom_edge_link(edge_colour = "gray", edge_alpha = edge_alpha, show.legend = FALSE) +
+    geom_node_point(aes(color = .data[[node_color_by]]), size = node_size, alpha = node_alpha) +
+    scale_color_discrete() +
+    theme_void() +
+    labs(title = paste("PatientID:", patient_id),
+         subtitle = paste("Number of Images:", length(unique(node_attrs$ImageID))),
+         color = node_color_by) +
+    coord_fixed()  # Ensure the aspect ratio is 1:1
+  
+  # Add faceting by ImageID if there are multiple images
+  if (length(unique(node_attrs$ImageID)) > 1) {
+    p <- p + facet_wrap(~ImageID)
+  }
+  
+  return(p)
+}
+```
+
+```{r}
+
+# Usage example:
+patient_id_to_visualize <- "NT008"  # Replace with your desired PatientID
+plot <- visualize_patient_spatial_graph(spatial_graph, spe_chemo, patient_id = patient_id_to_visualize, node_color_by = "celltype")
+print(plot)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### Measuring spatial proximity interactions with spe_chemo_immu_data
+
+```{r}
+
+# Updated function to build spatial graph with error handling
+build_spatial_graph1 <- function(spe_chemo_immu, k = 5) {
+  # Extract spatial coordinates and ImageID
+  coords <- spatialCoords(spe_chemo_immu)
+  image_ids <- spe_chemo_immu$ImageID
+  
+  # Initialize progress bar
+  pb <- progress_bar$new(
+    format = "[:bar] :percent ETA: :eta",
+    total = length(unique(image_ids)),
+    clear = FALSE,
+    width = 60
+  )
+  
+  # Function to compute k-NN for a single image
+  compute_knn_for_image <- function(img_id) {
+    img_indices <- which(image_ids == img_id)
+    img_coords <- coords[img_indices, ]
+    
+    if (nrow(img_coords) <= k) {
+      # If there are fewer points than k, connect all points to each other
+      knn_result <- list(
+        nn.idx = matrix(rep(1:nrow(img_coords), each = nrow(img_coords)), ncol = nrow(img_coords)),
+        nn.dists = as.matrix(dist(img_coords))
+      )
+    } else {
+      knn_result <- RANN::nn2(img_coords, k = k + 1)
+    }
+    
+    pb$tick()
+    return(list(indices = img_indices, knn = knn_result))
+  }
+  
+  # Compute k-NN for each image
+  knn_results <- lapply(unique(image_ids), compute_knn_for_image)
+  
+  # Create edge list
+  edges <- do.call(rbind, lapply(knn_results, function(res) {
+    idx <- res$indices[as.vector(res$knn$nn.idx[, -1])]
+    cbind(rep(res$indices, each = k), idx)
+  }))
+  
+  # Create igraph object
+  g <- graph_from_edgelist(edges, directed = FALSE)
+  
+  # Set edge weights with error handling
+  tryCatch({
+    weights <- unlist(lapply(knn_results, function(res) as.vector(res$knn$nn.dists[, -1])))
+    if (any(!is.numeric(weights))) {
+      stop("Non-numeric values found in distance calculations")
+    }
+    if (any(weights == 0)) {
+      warning("Zero distances found. Setting weights to a small non-zero value.")
+      weights[weights == 0] <- 1e-10
+    }
+    E(g)$weight <- 1 / weights
+  }, error = function(e) {
+    cat("Error in weight calculation:", conditionMessage(e), "\n")
+    cat("Debugging information:\n")
+    print(summary(unlist(lapply(knn_results, function(res) as.vector(res$knn$nn.dists[, -1])))))
+    stop("Weight calculation failed")
+  })
+  
+  # Set node attributes
+  V(g)$celltype <- spe_chemo_immu$ParentCell
+  V(g)$x <- coords[, 1]
+  V(g)$y <- coords[, 2]
+  V(g)$ImageID <- image_ids
+  
+  return(g)
+}
+
+```
+
+```{r}
+
+# Visualization function using ggraph
+visualize_spatial_graph1 <- function(graph, spe_chemo_immu, image_id, node_color_by = "celltype") {
+  # Filter the graph for the specified ImageID
+  nodes_to_keep <- which(spe_chemo_immu$ImageID == image_id)
+  subgraph <- induced_subgraph(graph, nodes_to_keep)
+  
+  # Remove isolated nodes
+  subgraph <- delete_vertices(subgraph, degree(subgraph) == 0)
+  
+  # Print graph information
+  cat("Full graph - Nodes:", vcount(graph), "Edges:", ecount(graph), "\n")
+  cat("Subgraph - Nodes:", vcount(subgraph), "Edges:", ecount(subgraph), "\n")
+  
+  # Check if the subgraph is empty
+  if (vcount(subgraph) == 0) {
+    warning("No nodes found for the specified ImageID.")
+    return(NULL)
+  }
+  
+  # Get node attributes
+  node_attrs <- data.frame(
+    celltype = V(subgraph)$celltype,
+    x = V(subgraph)$x,
+    y = V(subgraph)$y
+  )
+  
+  # Create a layout based on spatial coordinates
+  layout <- as.matrix(node_attrs[, c("x", "y")])
+  
+  # Create ggraph plot with nodes colored by the specified attribute
+  p <- ggraph(subgraph, layout = layout) +
+    geom_edge_link(edge_colour = "gray", edge_alpha = 0.2, show.legend = FALSE) +
+    geom_node_point(aes(color = .data[[node_color_by]]), size = 1, alpha = 0.7) +
+    scale_color_discrete() +
+    theme_void() +
+    labs(title = paste("ImageID:", image_id),
+         color = node_color_by) +
+    coord_fixed()  # Ensure the aspect ratio is 1:1
+  
+  return(p)
+}
+
+```
+
+```{r}
+
+# Usage example
+spatial_graph1 <- build_spatial_graph1(spe_chemo_immu, k = 5)
+
+```
+
+```{r}
+# Save the graph as metadata in the SPE object
+metadata(spe_chemo_immu)$spatial_graph <- spatial_graph1
+
+```
+
+```{r}
+
+# Choose a specific ImageID to visualize
+image_id_to_visualize <- "NTImg0010"  # Replace with your desired ImageID
+
+# Visualize the graph for the specific ImageID (using celltype for node color)
+plot <- visualize_spatial_graph1(spatial_graph1, spe_chemo_immu, image_id = image_id_to_visualize, node_color_by = "celltype")
+
+
+# Display the plot
+print(plot)
+```
+
+```{r}
+
+```
+
+### Multi-plot for ImageID's
+
+```{r}
+
+visualize_multiple_spatial_graphs1 <- function(graph, spe_chemo_immu, image_ids, node_color_by = "celltype", ncol = 2) {
+  # Check if image_ids is provided
+  if (missing(image_ids) || length(image_ids) == 0) {
+    stop("Please provide at least one ImageID to visualize.")
+  }
+
+  # Create a list to store individual plots
+  plot_list <- list()
+
+  # Generate plots for each ImageID
+  for (img_id in image_ids) {
+    plot <- visualize_spatial_graph(graph, spe_chemo_immu, image_id = img_id, node_color_by = node_color_by)
+    if (!is.null(plot)) {
+      plot_list[[img_id]] <- plot
+    }
+  }
+
+  # Check if any plots were generated
+  if (length(plot_list) == 0) {
+    stop("No valid plots were generated. Check your ImageIDs.")
+  }
+
+  # Combine plots using patchwork
+  combined_plot <- wrap_plots(plot_list, ncol = ncol)
+
+  # Add a title to the combined plot
+  final_plot <- combined_plot +
+    plot_annotation(
+      theme = theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+                    plot.subtitle = element_text(hjust = 0.5, size = 12))
+    )
+
+  return(final_plot)
+}
+```
+
+```{r}
+
+# Usage example:
+image_ids_to_visualize <- c("NTImg0001", "NTImg0002", "NTImg0003", "NTImg0004")
+multiplot <- visualize_multiple_spatial_graphs1(spatial_graph1, spe_chemo_immu, image_ids = image_ids_to_visualize, node_color_by = "celltype", ncol = 2)
+print(multiplot)
+```
+
+```{r}
+
+```
+
+### Single PatientID visualization
+
+```{r}
+
+visualize_patient_spatial_graph1 <- function(graph, spe_chemo_immu, patient_id, node_color_by = "celltype", edge_alpha = 0.1, node_size = 1, node_alpha = 0.7, max_edges = 10000) {
+  # Check if PatientID column exists in spe
+  if (!"PatientID" %in% colnames(colData(spe_chemo_immu))) {
+    stop("PatientID column not found in the SpatialExperiment object.")
+  }
+  
+  # Filter the graph for the specified PatientID
+  nodes_to_keep <- which(spe_chemo_immu$PatientID == patient_id)
+  subgraph <- induced_subgraph(graph, nodes_to_keep)
+  
+  # Remove isolated nodes
+  subgraph <- delete_vertices(subgraph, degree(subgraph) == 0)
+  
+  # Print graph information
+  cat("Full graph - Nodes:", vcount(graph), "Edges:", ecount(graph), "\n")
+  cat("Patient subgraph - Nodes:", vcount(subgraph), "Edges:", ecount(subgraph), "\n")
+  
+  # Check if the subgraph is empty
+  if (vcount(subgraph) == 0) {
+    warning("No nodes found for the specified PatientID.")
+    return(NULL)
+  }
+  
+  # Subsample edges if there are too many
+  if (ecount(subgraph) > max_edges) {
+    set.seed(42)  # for reproducibility
+    edges_to_keep <- sample(1:ecount(subgraph), max_edges)
+    edge_list <- as_edgelist(subgraph)[edges_to_keep, ]
+    subgraph <- graph_from_edgelist(edge_list, directed = FALSE)
+    
+    # Reapply vertex attributes
+    vertex_attr_names <- list.vertex.attributes(graph)
+    for (attr in vertex_attr_names) {
+      vertex_attr(subgraph, attr) <- vertex_attr(graph, attr)[V(subgraph)]
+    }
+    
+    cat("Subsampled edges - New edge count:", ecount(subgraph), "\n")
+  }
+  
+  # Get node attributes
+  node_attrs <- data.frame(
+    celltype = V(subgraph)$celltype,
+    x = V(subgraph)$x,
+    y = V(subgraph)$y,
+    ImageID = V(subgraph)$ImageID
+  )
+  
+  # Create a layout based on spatial coordinates
+  layout <- as.matrix(node_attrs[, c("x", "y")])
+  
+  # Create ggraph plot with nodes colored by the specified attribute
+  p <- ggraph(subgraph, layout = layout) +
+    geom_edge_link(edge_colour = "gray", edge_alpha = edge_alpha, show.legend = FALSE) +
+    geom_node_point(aes(color = .data[[node_color_by]]), size = node_size, alpha = node_alpha) +
+    scale_color_discrete() +
+    theme_void() +
+    labs(title = paste("PatientID:", patient_id),
+         subtitle = paste("Number of Images:", length(unique(node_attrs$ImageID))),
+         color = node_color_by) +
+    coord_fixed()  # Ensure the aspect ratio is 1:1
+  
+  # Add faceting by ImageID if there are multiple images
+  if (length(unique(node_attrs$ImageID)) > 1) {
+    p <- p + facet_wrap(~ImageID)
+  }
+  
+  return(p)
+}
+```
+
+```{r}
+
+# Usage example:
+patient_id_to_visualize <- "NT008"  # Replace with your desired PatientID
+plot <- visualize_patient_spatial_graph1(spatial_graph1, spe_chemo_immu, patient_id = patient_id_to_visualize, node_color_by = "celltype")
+print(plot)
+```
+
+```{r}
+
+```
+
+#### Save Datasets
+
+```{r}
+### Chemotherapy
+
+## Save data
+
+#saveRDS(spe_chemo, "saved_data/spe_chemo_Spatial_Graph.rds" )
+```
+
+```{r}
+
+### Chemotherapy
+
+## Save data
+
+#saveRDS(spe_chemo_immu, "saved_data/spe_chemo_immu_Spatial_Graph.rds" )
+```
+
+```{r}
+  
+```
+
+```{r}
+
+spe <- readRDS("saved_data/Spatial_Graph.rds")
+spe
+```
+
+```{r}
+
+# Subsetting based on the column 'Arm' Chemotherapy
+
+spe_chemotherapy <- spe[, colData(spe)$Arm == "C"]
+spe_chemotherapy
+```
+
+```{r}
+
+spe_chemotherapy_Immu <- spe[, colData(spe)$Arm == "C&I"]
+spe_chemotherapy_Immu
+```
+
+```{r}
+
+#saveRDS(spe_chemotherapy, "saved_data/spe_chemo_Spatial_Graph.rds" )
+```
+
+```{r}
+#saveRDS(spe_chemotherapy_Immu, "saved_data/spe_chemo_immu_Spatial_Graph.rds" )
+```
+
+```{r}
+
+```
+
+```         
+```

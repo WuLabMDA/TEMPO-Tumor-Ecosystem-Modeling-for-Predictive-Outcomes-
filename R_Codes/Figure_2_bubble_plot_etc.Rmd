@@ -1,0 +1,6899 @@
+---
+title: "R Notebook"
+output: html_notebook
+Author: Daniel Marri
+Task: TNBC Bubbleplot Analysi
+---
+
+```{r}
+setwd("V:/dkmarri/Breast_Cancer_IMC_Data/R_Codes")
+```
+
+```{r}
+
+library(imcRtools)
+library(cytomapper)
+library(tidyverse)
+library(EBImage)
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(dplyr)
+library(future)
+library(progress)
+library(Matrix)
+library(RANN)
+library(reticulate)
+library(igraph)
+library(tidyr)
+library(dittoSeq)
+library(scater)
+library(patchwork)
+library(cowplot)
+library(viridis)
+library(parallel) 
+library(spdep)
+library(spatialHeatmap)
+library(igraph)
+library(RANN)
+library(data.table)
+library(Matrix)
+library(parallel)
+library(furrr)
+library(scran)
+library(batchelor)
+library(BiocParallel)
+library(scater)  # For PCA, if not already installed
+library(SummarizedExperiment)
+library(sva)
+library(harmony)
+library(RColorBrewer)
+library(BiocSingular)
+library(scales)
+library(ggraph)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+```{r}
+Combined_data <- readRDS("saved_data/spe_Combined_Spatial_Graph.rds")
+Combined_data
+```
+
+#### Generating bubble plot
+
+```{r}
+
+
+```
+
+##### Extract and prepare data
+
+```{r}
+
+cluster_col <-"ParentCelltypes"
+```
+
+```{r}
+
+# Get expression data
+expr_mat <- assay(Combined_data, "transformed_counts")  # or "exprs" if you prefer raw exprs
+markers <- rownames(Combined_data) 
+genes <- rownames(Combined_data)
+cells <- colnames(Combined_data)
+
+expr_threshold <- 0.05
+```
+
+```{r}
+
+# Extract cluster info from colData
+cluster_df <- as.data.frame(colData(Combined_data)) %>%
+  tibble::rownames_to_column("Cell") %>%
+  select(Cell, cluster = !!sym(cluster_col))
+```
+
+```{r}
+
+# Convert expression matrix into tidy long format
+expr_df <- as.data.frame(t(expr_mat))
+expr_df$Cell <- cells
+
+expr_long <- expr_df %>%
+  left_join(cluster_df, by = "Cell") %>%
+  pivot_longer(cols = all_of(genes), names_to = "Gene", values_to = "count")
+```
+
+```{r}
+
+plot_data <- expr_long %>%
+  filter(Gene %in% markers) %>%
+  group_by(Gene, cluster) %>%
+  summarise(
+    cell_ct = n(),
+    cell_exp_ct = sum(count >= expr_threshold, na.rm = TRUE),
+    avg_expr = mean(count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(`% Expressing` = (cell_exp_ct / cell_ct) * 100) %>%
+  filter(avg_expr > 0, `% Expressing` > 1)
+```
+
+```{r}
+markers_sub <- c("HLA-ABC", "CD68", "CD163", "CA9", "H3","panCk", "CD11c", "CA9", "CD3",  "FOXP3", "CA9", "SMA", "Ki67", "HLA-DR", "panCK", "Caveolin-1", "DNA2"   )
+plot_data_subset <- plot_data %>% filter(Gene %in% markers_sub)
+```
+
+##### Summarize expression per cluster
+
+```{r}
+
+p <- ggplot(plot_data_subset, aes(x = Gene, y = cluster, color = avg_expr, size = `% Expressing`)) +
+  geom_point() +
+  cowplot::theme_cowplot() +
+  theme(
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.ticks = element_line(color = "black"),
+    axis.text.x = element_text(
+      angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold", color = "black"
+    ),
+    axis.text.y = element_text(size = 10, face = "bold", color = "black"),
+    axis.title.x = element_text(size = 12, face = "bold", color = "black"),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    panel.border = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  xlab("Markers") +
+  ylab("Cell Type") +
+  scale_color_gradient2(
+    low = "blue", mid = "white", high = "red",
+    midpoint = median(plot_data$avg_expr, na.rm = TRUE),
+    name = "Average Expression"
+  ) +
+  scale_size_continuous(name = "% Expressing") +
+  ggtitle("Combined Bubble Plot")
+
+
+# Display the plot
+print(p)
+```
+
+```{r}
+# Save the plot as a high-resolution PNG
+ggsave(
+  filename = "Combined_BubblePlot.png",
+  plot = p,
+  width = 8,        # in inches
+  height = 6,
+  dpi = 650,        # high-resolution
+  units = "in"
+)
+```
+
+```{r}
+
+```
+
+##### Plot Heatmap
+
+```{r}
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",      # Blue color 
+  "Effector T Cells" = "#00FFFF",  # Cyan color
+  "Endothelial Cells" = "#4E1251ED", # Black color
+  "Fibroblasts" = "#FF0000",       # Red color
+  "Macrophages" = "#00FF00",       # Green color
+  "Other" = "#e06000",             # Dark orange color
+  "Regulatory T Cells" = "#FD3DB5" # Magenta color
+)
+```
+
+```{r}
+
+# Step 1: Define function to calculate mean expression per cell type
+calculate_celltype_means <- function(Combined_data) {
+  expr_data <- assay(Combined_data, "transformed_counts")
+  cell_types <- colData(Combined_data)$ParentCelltypes
+  
+  expr_df <- as.data.frame(t(expr_data))
+  expr_df$celltype <- cell_types
+  
+  celltype_means <- expr_df %>%
+    group_by(celltype) %>%
+    summarise(across(where(is.numeric), \(x) mean(x, na.rm = TRUE)), .groups = 'drop') %>%
+    column_to_rownames("celltype") %>%
+    t()
+  
+  return(celltype_means)
+}
+
+
+```
+
+```{r}
+# Step 2: Compute mean expression matrix
+mean_expr_matrix <- calculate_celltype_means(Combined_data)
+
+# Remove NA-only rows/columns if any
+mean_expr_matrix <-mean_expr_matrix[complete.cases(mean_expr_matrix), ]
+mean_expr_matrix <- mean_expr_matrix[, colSums(is.na(mean_expr_matrix)) != nrow(mean_expr_matrix)]
+
+# Step 3: Normalize to [0, 1] range per protein (row-wise)
+mean_expr_scaled <- t(apply(mean_expr_matrix, 1, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (rng[1] == rng[2]) {
+    rep(0, length(x))  # Avoid divide-by-zero: flat expression = 0
+  } else {
+    (x - rng[1]) / (rng[2] - rng[1])
+  }
+}))
+
+# Step 4: Generate CellType color palette using Polychrome
+celltype_levels <- colnames(mean_expr_matrix)
+num_celltypes <- length(celltype_levels)
+
+if (num_celltypes <= 12) {
+  celltype_palette <- setNames(RColorBrewer::brewer.pal(num_celltypes, "Set2"), celltype_levels)
+} else {
+  celltype_palette <- setNames(
+    createPalette(num_celltypes, seedcolors = c("#E1BE6A", "#40B0A6")),
+    celltype_levels
+  )
+}
+
+
+# Fix missing column names
+colnames(mean_expr_scaled) <- colnames(mean_expr_scaled)
+```
+
+```{r}
+
+column_ha <- HeatmapAnnotation(
+  CellType = colnames(mean_expr_scaled),
+  col = list(CellType = cell_type_colors),
+  annotation_name_side = "left"
+)
+
+
+col_fun <- colorRamp2(
+  c(0, 0.5, 1),
+  c("blue", "white", "red")
+)
+
+```
+
+#### 
+
+```{r}
+
+library(grid)
+
+p2 <- Heatmap(
+  matrix = mean_expr_scaled,
+  name = "Normalized Mean\nExpression",
+  col = col_fun,
+  top_annotation = column_ha,       # custom cell type colors
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+  column_names_rot = 45,
+  column_names_gp = gpar(fontsize = 8, fontface = "bold"),
+  row_names_gp = gpar(fontsize = 6, fontface = "bold"),
+  heatmap_legend_param = list(
+    title = "Expression",
+    color_bar = "continuous"
+  ),
+  column_title = "",
+  row_title = "Proteins"
+)
+
+# Draw the heatmap with legends aligned in one column
+draw(
+  p2,
+  heatmap_legend_side = "right",       # place both legends on the right
+  annotation_legend_side = "right",    # put annotation legend below the heatmap legend
+  merge_legend = TRUE                  # merges them into one stacked column
+)
+```
+
+```{r}
+
+# Save the plot as a high-resolution PNG
+png("Combined_Heatmap.png", width = 5, height = 5, units = "in", res = 900)
+draw(p2, heatmap_legend_side = "right", annotation_legend_side = "right", merge_legend = TRUE)
+dev.off()
+```
+
+#### Extract highly expressed proteins
+
+```{r}
+
+threshold <- 0.70
+```
+
+```{r}
+
+# Convert matrix to long format
+high_expr_df <- as.data.frame(mean_expr_scaled) %>%
+  rownames_to_column("Protein") %>%
+  pivot_longer(-Protein, names_to = "CellType", values_to = "Expression") %>%
+  filter(Expression > threshold)
+```
+
+```{r}
+
+ggplot(high_expr_df, aes(x = Expression, y = fct_reorder(Protein, Expression))) +
+  geom_col(aes(fill = CellType)) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 4) +
+  scale_fill_manual(values = cell_type_colors, guide = "none") +  # Use generated palette
+  theme_minimal(base_size = 10) +
+  labs(
+    title = "Highly Expressed Proteins by CellType for Combined Data",
+    x = "Expression level",
+    y = "Protein"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size =8),
+    axis.text.x = element_text(face = "bold", color = "black", size = 7),
+    axis.text.y = element_text(face = "bold", color = "black", size = 7),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.3)
+  )
+```
+
+```{r}
+
+png("Highly_expressed_proteins_Combined_Data.png", width = 6500, height = 4000, res = 900)  
+
+ggplot(high_expr_df, aes(x = Expression, y = fct_reorder(Protein, Expression))) +
+  geom_col(aes(fill = CellType)) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 4) +
+  scale_fill_manual(values = cell_type_colors, guide = "none") +  # Use generated palette
+  theme_minimal(base_size = 10) +
+  labs(
+    title = "",
+    x = "Expression level",
+    y = "Protein"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size = 8),
+    axis.text.x = element_text(face = "bold", color = "black", size = 7),
+    axis.text.y = element_text(face = "bold", color = "black", size = 7),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.3)
+  )
+
+dev.off()
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### For Chemotherapy Only
+
+```{r}
+
+chemo <- Combined_data[, colData(Combined_data)$Arm == "C"]
+```
+
+```{r}
+
+# Get expression data
+expr_mat_1 <- assay(chemo, "transformed_counts")  # or "exprs" if you prefer raw exprs
+markers_1 <- rownames(chemo) 
+genes_1 <- rownames(chemo)
+cells_1 <- colnames(chemo)
+
+expr_threshold <- 0.05
+```
+
+```{r}
+
+# Extract cluster info from colData
+cluster_df_1 <- as.data.frame(colData(chemo)) %>%
+  tibble::rownames_to_column("Cell") %>%
+  select(Cell, cluster = !!sym(cluster_col))
+```
+
+```{r}
+
+# Convert expression matrix into tidy long format
+expr_df_1 <- as.data.frame(t(expr_mat_1))
+expr_df_1$Cell <- cells_1
+
+expr_long_1 <- expr_df_1 %>%
+  left_join(cluster_df_1, by = "Cell") %>%
+  pivot_longer(cols = all_of(genes_1), names_to = "Gene", values_to = "count")
+```
+
+```{r}
+
+plot_data_1 <- expr_long_1 %>%
+  filter(Gene %in% markers_1) %>%
+  group_by(Gene, cluster) %>%
+  summarise(
+    cell_ct = n(),
+    cell_exp_ct = sum(count >= expr_threshold, na.rm = TRUE),
+    avg_expr = mean(count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(`% Expressing` = (cell_exp_ct / cell_ct) * 100) %>%
+  filter(avg_expr > 0, `% Expressing` > 1)
+```
+
+```{r}
+markers_sub <- c("HLA-ABC", "CD68", "CD163", "CA9", "H3","panCk", "CD11c", "CA9", "CD3",  "FOXP3", "CA9", "SMA", "Ki67", "HLA-DR", "panCK", "Caveolin-1", "DNA2"   )
+plot_data_subset_1 <- plot_data_1 %>% filter(Gene %in% markers_sub)
+```
+
+##### Summarize expression per cluster
+
+```{r}
+
+p3 <- ggplot(plot_data_subset_1, aes(x = Gene, y = cluster, color = avg_expr, size = `% Expressing`)) +
+  geom_point() +
+  cowplot::theme_cowplot() +
+  theme(
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.ticks = element_line(color = "black"),
+    axis.text.x = element_text(
+      angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold", color = "black"
+    ),
+    axis.text.y = element_text(size = 10, face = "bold", color = "black"),
+    axis.title.x = element_text(size = 12, face = "bold", color = "black"),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    panel.border = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  xlab("Markers") +
+  ylab("Cell Type") +
+  scale_color_gradient2(
+    low = "blue", mid = "white", high = "red",
+    midpoint = median(plot_data$avg_expr, na.rm = TRUE),
+    name = "Average Expression"
+  ) +
+  scale_size_continuous(name = "% Expressing") +
+  ggtitle("Chemo Bubble Plot")
+
+
+# Display the plot
+print(p3)
+```
+
+```{r}
+# Save the plot as a high-resolution PNG
+ggsave(
+  filename = "Chemo_BubblePlot.png",
+  plot = p3,
+  width = 8,        # in inches
+  height = 5,
+  dpi = 650,        # high-resolution
+  units = "in"
+)
+```
+
+```{r}
+
+```
+
+##### Plot Heatmap
+
+```{r}
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",      # Blue color 
+  "Effector T Cells" = "#00FFFF",  # Cyan color
+  "Endothelial Cells" = "#4E1251ED", # Black color
+  "Fibroblasts" = "#FF0000",       # Red color
+  "Macrophages" = "#00FF00",       # Green color
+  "Other" = "#e06000",             # Dark orange color
+  "Regulatory T Cells" = "#FD3DB5" # Magenta color
+)
+```
+
+```{r}
+
+# Step 1: Define function to calculate mean expression per cell type
+calculate_celltype_means <- function(chemo) {
+  expr_data <- assay(chemo, "transformed_counts")
+  cell_types <- colData(chemo)$ParentCelltypes
+  
+  expr_df <- as.data.frame(t(expr_data))
+  expr_df$celltype <- cell_types
+  
+  celltype_means <- expr_df %>%
+    group_by(celltype) %>%
+    summarise(across(where(is.numeric), \(x) mean(x, na.rm = TRUE)), .groups = 'drop') %>%
+    column_to_rownames("celltype") %>%
+    t()
+  
+  return(celltype_means)
+}
+
+
+```
+
+```{r}
+# Step 2: Compute mean expression matrix
+mean_expr_matrix_1 <- calculate_celltype_means(chemo)
+
+# Remove NA-only rows/columns if any
+mean_expr_matrix_1 <-mean_expr_matrix_1[complete.cases(mean_expr_matrix_1), ]
+mean_expr_matrix_1 <- mean_expr_matrix_1[, colSums(is.na(mean_expr_matrix_1)) != nrow(mean_expr_matrix_1)]
+
+# Step 3: Normalize to [0, 1] range per protein (row-wise)
+mean_expr_scaled_1 <- t(apply(mean_expr_matrix_1, 1, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (rng[1] == rng[2]) {
+    rep(0, length(x))  # Avoid divide-by-zero: flat expression = 0
+  } else {
+    (x - rng[1]) / (rng[2] - rng[1])
+  }
+}))
+
+# Step 4: Generate CellType color palette using Polychrome
+celltype_levels <- colnames(mean_expr_matrix_1)
+num_celltypes <- length(celltype_levels)
+
+if (num_celltypes <= 12) {
+  celltype_palette <- setNames(RColorBrewer::brewer.pal(num_celltypes, "Set2"), celltype_levels)
+} else {
+  celltype_palette <- setNames(
+    createPalette(num_celltypes, seedcolors = c("#E1BE6A", "#40B0A6")),
+    celltype_levels
+  )
+}
+
+
+# Fix missing column names
+colnames(mean_expr_scaled_1) <- colnames(mean_expr_scaled_1)
+```
+
+```{r}
+
+column_ha_1 <- HeatmapAnnotation(
+  CellType = colnames(mean_expr_scaled_1),
+  col = list(CellType = cell_type_colors),
+  annotation_name_side = "left",
+  show_legend = FALSE 
+  
+)
+
+
+col_fun <- colorRamp2(
+  c(0, 0.5, 1),
+  c("blue", "white", "red")
+)
+
+```
+
+#### 
+
+```{r}
+
+library(grid)
+
+p4 <- Heatmap(
+  matrix = mean_expr_scaled_1,
+  name = "Normalized Mean\nExpression",
+  col = col_fun,
+  top_annotation = column_ha_1,       # custom cell type colors
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+  #column_names_rot = 45,
+  column_names_gp = gpar(fontsize = 8, fontface = "bold"),
+  row_names_gp = gpar(fontsize = 6, fontface = "bold"),
+  heatmap_legend_param = list(
+    title = "Expression",
+    color_bar = "continuous"
+  ),
+  column_title = "",
+  row_title = "Proteins"
+)
+
+# Draw the heatmap with legends aligned in one column
+draw(
+  p4,
+  heatmap_legend_side = "right",       # place both legends on the right
+  show_annotation_legend = FALSE,    # put annotation legend below the heatmap legend
+  merge_legend = TRUE                  # merges them into one stacked column
+)
+```
+
+```{r}
+
+# Save the plot as a high-resolution PNG
+png("chemo_Heatmap.png", width = 5, height = 4.5, units = "in", res = 1950)
+draw(p4, heatmap_legend_side = "right", annotation_legend_side = "right", merge_legend = TRUE)
+dev.off()
+```
+
+```{r}
+
+```
+
+#### Extract highly expressed proteins
+
+```{r}
+
+threshold <- 0.70
+```
+
+```{r}
+
+# Convert matrix to long format
+high_expr_df <- as.data.frame(mean_expr_scaled_1) %>%
+  rownames_to_column("Protein") %>%
+  pivot_longer(-Protein, names_to = "CellType", values_to = "Expression") %>%
+  filter(Expression > threshold)
+```
+
+```{r}
+
+ggplot(high_expr_df, aes(x = Expression, y = fct_reorder(Protein, Expression))) +
+  geom_col(aes(fill = CellType)) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 4) +
+  scale_fill_manual(values = cell_type_colors, guide = "none") +  # Use generated palette
+  theme_minimal(base_size = 10) +
+  labs(
+    title = "Highly Expressed Proteins by CellType for Combined Data",
+    x = "Expression level",
+    y = "Protein"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size = 9),
+    axis.text.x = element_text(face = "bold", color = "black", size = 9),
+    axis.text.y = element_text(face = "bold", color = "black", size = 9),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.3)
+  )
+```
+
+```{r}
+
+png("Highly_expressed_proteins_Chemotherapy.png", width = 6200, height = 3700, res = 900)  
+
+ggplot(high_expr_df, aes(x = Expression, y = fct_reorder(Protein, Expression))) +
+  geom_col(aes(fill = CellType)) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 4) +
+  scale_fill_manual(values = cell_type_colors, guide = "none") +  # Use generated palette
+  theme_minimal(base_size = 10) +
+  labs(
+    title = "",
+    x = "Expression level",
+    y = "Protein"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size = 8),
+    axis.text.x = element_text(face = "bold", color = "black", size = 7),
+    axis.text.y = element_text(face = "bold", color = "black", size = 7),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.3)
+  )
+
+dev.off()
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### For Chemotherapy & Immunotherapy
+
+```{r}
+
+chemo_immu <- Combined_data[, colData(Combined_data)$Arm == "C&I"]
+```
+
+```{r}
+
+# Get expression data
+expr_mat_2 <- assay(chemo_immu, "transformed_counts")  # or "exprs" if you prefer raw exprs
+markers_2 <- rownames(chemo_immu) 
+genes_2 <- rownames(chemo_immu)
+cells_2 <- colnames(chemo_immu)
+
+expr_threshold <- 0.05
+```
+
+```{r}
+
+# Extract cluster info from colData
+cluster_df_2 <- as.data.frame(colData(chemo_immu)) %>%
+  tibble::rownames_to_column("Cell") %>%
+  select(Cell, cluster = !!sym(cluster_col))
+```
+
+```{r}
+
+# Convert expression matrix into tidy long format
+expr_df_2 <- as.data.frame(t(expr_mat_2))
+expr_df_2$Cell <- cells_2
+
+expr_long_2 <- expr_df_2 %>%
+  left_join(cluster_df_2, by = "Cell") %>%
+  pivot_longer(cols = all_of(genes_2), names_to = "Gene", values_to = "count")
+```
+
+```{r}
+
+plot_data_2 <- expr_long_2 %>%
+  filter(Gene %in% markers_2) %>%
+  group_by(Gene, cluster) %>%
+  summarise(
+    cell_ct = n(),
+    cell_exp_ct = sum(count >= expr_threshold, na.rm = TRUE),
+    avg_expr = mean(count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(`% Expressing` = (cell_exp_ct / cell_ct) * 100) %>%
+  filter(avg_expr > 0, `% Expressing` > 1)
+```
+
+```{r}
+markers_sub <- c("HLA-ABC", "CD68", "CD163", "CA9", "H3","panCk", "CD11c", "CA9", "CD3",  "FOXP3", "CA9", "SMA", "Ki67", "HLA-DR", "panCK", "Caveolin-1", "DNA2"   )
+plot_data_subset_2 <- plot_data_2 %>% filter(Gene %in% markers_sub)
+```
+
+##### Summarize expression per cluster
+
+```{r}
+
+p5 <- ggplot(plot_data_subset_2, aes(x = Gene, y = cluster, color = avg_expr, size = `% Expressing`)) +
+  geom_point() +
+  cowplot::theme_cowplot() +
+  theme(
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.ticks = element_line(color = "black"),
+    axis.text.x = element_text(
+      angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold", color = "black"
+    ),
+    axis.text.y = element_text(size = 10, face = "bold", color = "black"),
+    axis.title.x = element_text(size = 12, face = "bold", color = "black"),
+    axis.title.y = element_text(size = 12, face = "bold", color = "black"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    panel.border = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  xlab("Markers") +
+  ylab("Cell Type") +
+  scale_color_gradient2(
+    low = "blue", mid = "white", high = "red",
+    midpoint = median(plot_data$avg_expr, na.rm = TRUE),
+    name = "Average Expression"
+  ) +
+  scale_size_continuous(name = "% Expressing") +
+  ggtitle("Chemo & Immuno Bubble Plot")
+
+
+# Display the plot
+print(p5)
+```
+
+```{r}
+# Save the plot as a high-resolution PNG
+ggsave(
+  filename = "Chemo_immun_BubblePlot.png",
+  plot = p5,
+  width = 8,        # in inches
+  height = 5,
+  dpi = 650,        # high-resolution
+  units = "in"
+)
+```
+
+```{r}
+
+```
+
+##### Plot Heatmap
+
+```{r}
+cell_type_colors <- c(
+  "Cancer Cells" = "#0000FF",      # Blue color 
+  "Effector T Cells" = "#00FFFF",  # Cyan color
+  "Endothelial Cells" = "#4E1251ED", # Black color
+  "Fibroblasts" = "#FF0000",       # Red color
+  "Macrophages" = "#00FF00",       # Green color
+  "Other" = "#e06000",             # Dark orange color
+  "Regulatory T Cells" = "#FD3DB5" # Magenta color
+)
+```
+
+```{r}
+
+# Step 1: Define function to calculate mean expression per cell type
+calculate_celltype_means <- function(chemo_immu) {
+  expr_data <- assay(chemo_immu, "transformed_counts")
+  cell_types <- colData(chemo_immu)$ParentCelltypes
+  
+  expr_df <- as.data.frame(t(expr_data))
+  expr_df$celltype <- cell_types
+  
+  celltype_means <- expr_df %>%
+    group_by(celltype) %>%
+    summarise(across(where(is.numeric), \(x) mean(x, na.rm = TRUE)), .groups = 'drop') %>%
+    column_to_rownames("celltype") %>%
+    t()
+  
+  return(celltype_means)
+}
+
+
+```
+
+```{r}
+# Step 2: Compute mean expression matrix
+mean_expr_matrix_2 <- calculate_celltype_means(chemo_immu)
+
+# Remove NA-only rows/columns if any
+mean_expr_matrix_2 <-mean_expr_matrix_2[complete.cases(mean_expr_matrix_2), ]
+mean_expr_matrix_2 <- mean_expr_matrix_2[, colSums(is.na(mean_expr_matrix_2)) != nrow(mean_expr_matrix_2)]
+
+# Step 3: Normalize to [0, 1] range per protein (row-wise)
+mean_expr_scaled_2 <- t(apply(mean_expr_matrix_2, 1, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (rng[1] == rng[2]) {
+    rep(0, length(x))  # Avoid divide-by-zero: flat expression = 0
+  } else {
+    (x - rng[1]) / (rng[2] - rng[1])
+  }
+}))
+
+# Step 4: Generate CellType color palette using Polychrome
+celltype_levels <- colnames(mean_expr_matrix_2)
+num_celltypes <- length(celltype_levels)
+
+if (num_celltypes <= 12) {
+  celltype_palette <- setNames(RColorBrewer::brewer.pal(num_celltypes, "Set2"), celltype_levels)
+} else {
+  celltype_palette <- setNames(
+    createPalette(num_celltypes, seedcolors = c("#E1BE6A", "#40B0A6")),
+    celltype_levels
+  )
+}
+
+
+# Fix missing column names
+colnames(mean_expr_scaled_2) <- colnames(mean_expr_scaled_2)
+```
+
+```{r}
+
+column_ha_2 <- HeatmapAnnotation(
+  CellType = colnames(mean_expr_scaled_2),
+  col = list(CellType = cell_type_colors),
+  annotation_name_side = "left",
+   show_legend = FALSE 
+)
+
+
+col_fun <- colorRamp2(
+  c(0, 0.5, 1),
+  c("blue", "white", "red")
+)
+
+```
+
+#### 
+
+```{r}
+
+library(grid)
+
+p6 <- Heatmap(
+  matrix = mean_expr_scaled_2,
+  name = "Normalized Mean\nExpression",
+  col = col_fun,
+  top_annotation = column_ha_2,       # custom cell type colors
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+  column_names_rot = 45,
+  column_names_gp = gpar(fontsize = 8, fontface = "bold"),
+  row_names_gp = gpar(fontsize = 6, fontface = "bold"),
+  heatmap_legend_param = list(
+    title = "Expression",
+    color_bar = "continuous"
+  ),
+  column_title = "",
+  row_title = "Proteins"
+)
+
+# Draw the heatmap with legends aligned in one column
+draw(
+  p6,
+  heatmap_legend_side = "right",       # place both legends on the right
+  annotation_legend_side = "right",    # put annotation legend below the heatmap legend
+  merge_legend = TRUE                  # merges them into one stacked column
+)
+```
+
+```{r}
+
+# Save the plot as a high-resolution PNG
+png("chemo_immuno_Heatmap.png", width = 5, height = 4.5, units = "in", res = 1950)
+draw(p6, heatmap_legend_side = "right", annotation_legend_side = "right", merge_legend = TRUE)
+dev.off()
+```
+
+```{r}
+
+```
+
+#### Extract highly expressed proteins
+
+```{r}
+
+threshold <- 0.70
+```
+
+```{r}
+
+# Convert matrix to long format
+high_expr_df <- as.data.frame(mean_expr_scaled_2) %>%
+  rownames_to_column("Protein") %>%
+  pivot_longer(-Protein, names_to = "CellType", values_to = "Expression") %>%
+  filter(Expression > threshold)
+```
+
+```{r}
+
+ggplot(high_expr_df, aes(x = Expression, y = fct_reorder(Protein, Expression))) +
+  geom_col(aes(fill = CellType)) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 4) +
+  scale_fill_manual(values = cell_type_colors, guide = "none") +  # Use generated palette
+  theme_minimal(base_size = 10) +
+  labs(
+    title = "Highly Expressed Proteins by CellType for Combined Data",
+    x = "Expression level",
+    y = "Protein"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size = 8),
+    axis.text.x = element_text(face = "bold", color = "black", size = 7),
+    axis.text.y = element_text(face = "bold", color = "black", size = 7),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.3)
+  )
+```
+
+```{r}
+
+png("Highly_expressed_proteins_chemotherapy_&_immuno.png", width = 6200, height = 3700, res = 950)  
+
+ggplot(high_expr_df, aes(x = Expression, y = fct_reorder(Protein, Expression))) +
+  geom_col(aes(fill = CellType)) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 4) +
+  scale_fill_manual(values = cell_type_colors, guide = "none") +  # Use generated palette
+  theme_minimal(base_size = 10) +
+  labs(
+    title = "",
+    x = "Expression level",
+    y = "Protein"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size = 8),
+    axis.text.x = element_text(face = "bold", color = "black", size = 7),
+    axis.text.y = element_text(face = "bold", color = "black", size = 7),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.3)
+  )
+
+dev.off()
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### Generate spatial figures
+
+#### Chemotherapy
+
+##### Baseline PCR
+
+```{r}
+chemo_bas_pcr <- chemo[, colData(chemo)$BiopsyPhase %in% c("Baseline") & colData(chemo)$pCR == "pCR"]
+chemo_bas_pcr
+```
+
+```{r}
+
+ #unique(chemo_bas_pcr$ImageID)
+```
+
+```{r}
+baseline_image_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0745FullStack.tiff")
+
+channelNames(baseline_image_1) <- markers
+
+baseline_mask_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0745CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(baseline_image_1, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  bright_marker_colors <- c(
+    "AR"          = "#FF1A1A",  # intense red
+    "CD8"         = "#00CC00",  # neon green
+    "FOXP3"       = "#0033FF",  # bright royal blue
+    "CD163"       = "#00FFFF",  # bright cyan
+    "CD11c"       = "#FF00FF",  # hot magenta
+    "Carboplatin" = "#FFD700"   # bright gold yellow
+  )
+  
+  plot_colors <- bright_marker_colors[markers]
+  
+  # Plot all selected markers on the same image without image ID
+   plotPixels(
+    image = img_list,
+    colour_by = markers,
+    colour = list(channels = plot_colors),
+    image_title = NULL
+  )  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(baseline_image_1, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+  
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(baseline_image_1, selected_markers,
+                                  filename = "Baseline_pcr.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_bas_pcr)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(baseline_image_1) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- baseline_mask_1[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_bas_pcr)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = baseline_image_1,
+  mask = seg_mask_list,
+  object = chemo_bas_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_bas_pcr)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+
+png(
+  filename = "Baseline_pcr_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = baseline_image_1,
+  mask = seg_mask_list,
+  object = chemo_bas_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_bas_pcr)$Colour),
+  thick = TRUE
+)
+
+dev.off()
+```
+
+#### New One
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg0745"
+
+# Load and prepare image
+baseline_image_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0745FullStack.tiff")
+channelNames(baseline_image_1) <- rownames(chemo_bas_pcr)
+mcols(baseline_image_1) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+baseline_mask_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0745CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(baseline_image_1[[1]]), "\n")
+cat("Mask dimensions:", dim(baseline_mask_1[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array <- imageData(baseline_mask_1[[1]])
+mask_array_int <- array(as.integer(mask_array), dim = dim(mask_array))
+
+# Create new Image object with integer data
+mask_matrix <- Image(mask_array_int, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list <- CytoImageList(mask_matrix)
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(baseline_image_1[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_bas_pcr_subset <- chemo_bas_pcr[, colData(chemo_bas_pcr)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_bas_pcr_subset) <- assays(chemo_bas_pcr_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_bas_pcr_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(baseline_image_1)) {
+    ch_idx <- which(channelNames(baseline_image_1) == marker)
+    ch_values <- baseline_image_1[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      baseline_image_1[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = baseline_image_1,
+  mask = seg_mask_list,
+  object = chemo_bas_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_bas_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_bas_pcr_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_bas_pcr_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_bas_pcr_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "Baseline_pcr_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = baseline_image_1,
+  mask = seg_mask_list,
+  object = chemo_bas_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_bas_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_bas_pcr_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_bas_pcr_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_bas_pcr_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+
+dev.off()
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+##### On-treatment PCR
+
+```{r}
+chemo_onT_pcr <- chemo[, colData(chemo)$BiopsyPhase %in% c("On-treatment") & colData(chemo)$pCR == "pCR"]
+chemo_onT_pcr
+```
+
+```{r}
+
+ unique(chemo_onT_pcr$ImageID)
+```
+
+```{r}
+Ontreatment_image_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0779FullStack.tiff")
+
+channelNames(Ontreatment_image_1) <- markers
+
+Ontreatment_mask_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0779CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(Ontreatment_image_1, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(Ontreatment_image_1, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(Ontreatment_image_1, selected_markers,
+                                  filename = "Ontreatment_pcr.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_onT_pcr)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(Ontreatment_image_1) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- Ontreatment_mask_1[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_onT_pcr)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = Ontreatment_image_1,
+  mask = seg_mask_list,
+  object = chemo_onT_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_onT_pcr)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+
+png(
+  filename = "Ontreatment_pcr_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+
+plotPixels(
+  image = Ontreatment_image_1,
+  mask = seg_mask_list,
+  object = chemo_onT_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_onT_pcr)$Colour),
+  thick = TRUE
+)
+
+
+dev.off()
+```
+
+```{r}
+
+```
+
+#### New One On Treatment
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg0779"
+
+# Load and prepare image
+Ontreatment_image_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0779FullStack.tiff")
+channelNames(Ontreatment_image_1) <- rownames(chemo_onT_pcr)
+mcols(Ontreatment_image_1) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+Ontreatment_mask_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0779CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(Ontreatment_image_1[[1]]), "\n")
+cat("Mask dimensions:", dim(Ontreatment_mask_1[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_1 <- imageData(Ontreatment_mask_1[[1]])
+mask_array_int_1 <- array(as.integer(mask_array_1), dim = dim(mask_array_1))
+
+# Create new Image object with integer data
+mask_matrix_1 <- Image(mask_array_int_1, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_1 <- CytoImageList(mask_matrix_1)
+mcols(seg_mask_list_1) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(Ontreatment_image_1[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_1[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_onT_pcr_subset <- chemo_onT_pcr[, colData(chemo_onT_pcr)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_onT_pcr_subset) <- assays(chemo_onT_pcr_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_onT_pcr_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(Ontreatment_image_1)) {
+    ch_idx <- which(channelNames(Ontreatment_image_1) == marker)
+    ch_values <- Ontreatment_image_1[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      Ontreatment_image_1[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = Ontreatment_image_1,
+  mask = seg_mask_list_1,
+  object = chemo_onT_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_onT_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_onT_pcr_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_onT_pcr_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_onT_pcr_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "Ontreatment_pcr_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Ontreatment_image_1,
+  mask = seg_mask_list_1,
+  object = chemo_onT_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_onT_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_onT_pcr_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_onT_pcr_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_onT_pcr_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+
+
+dev.off()
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+##### Post-treatment PCR
+
+```{r}
+chemo_posT_pcr <- chemo[, colData(chemo)$BiopsyPhase %in% c("Post-treatment") & colData(chemo)$pCR == "pCR"]
+chemo_posT_pcr
+```
+
+```{r}
+
+ unique(chemo_posT_pcr$ImageID)
+```
+
+```{r}
+Posttreatment_image_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0394FullStack.tiff")
+
+channelNames(Posttreatment_image_1) <- markers
+
+Posttreatment_mask_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0394CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(Posttreatment_image_1, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(Posttreatment_image_1, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+ 
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(Posttreatment_image_1, selected_markers,
+                                  filename = "Post_Treatment_pcr.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_posT_pcr)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(Posttreatment_image_1) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- Posttreatment_mask_1[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.0000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_posT_pcr)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = Posttreatment_image_1,
+  mask = seg_mask_list,
+  object = chemo_posT_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_posT_pcr)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+ 
+png(
+  filename = "Posttreatment_pcr_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+plotPixels(
+  image = Posttreatment_image_1,
+  mask = seg_mask_list,
+  object = chemo_posT_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_posT_pcr)$Colour),
+  thick = TRUE
+)
+dev.off()
+```
+
+```{r}
+
+```
+
+#### New One PostTreatment
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg0112"
+
+# Load and prepare image
+Posttreatment_image_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0112FullStack.tiff")
+channelNames(Posttreatment_image_1) <- rownames(chemo_posT_pcr)
+mcols(Posttreatment_image_1) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+Posttreatment_mask_1 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0112CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(Posttreatment_image_1[[1]]), "\n")
+cat("Mask dimensions:", dim(Posttreatment_mask_1[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_2 <- imageData(Posttreatment_mask_1[[1]])
+mask_array_int_2 <- array(as.integer(mask_array_2), dim = dim(mask_array_2))
+
+# Create new Image object with integer data
+mask_matrix_2 <- Image(mask_array_int_2, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_2 <- CytoImageList(mask_matrix_2)
+mcols(seg_mask_list_2) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(Posttreatment_image_1[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_2[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_posT_pcr_subset <- chemo_posT_pcr[, colData(chemo_posT_pcr)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_posT_pcr_subset) <- assays(chemo_posT_pcr_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_posT_pcr_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(Posttreatment_image_1)) {
+    ch_idx <- which(channelNames(Posttreatment_image_1) == marker)
+    ch_values <- Posttreatment_image_1[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      Posttreatment_image_1[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = Posttreatment_image_1,
+  mask = seg_mask_list_2,
+  object = chemo_posT_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  #outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors
+    #ParentCelltypes = metadata(chemo_posT_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_posT_pcr_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_posT_pcr_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_posT_pcr_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  outline_by = NULL, 
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "Posttreatment_pcr_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Posttreatment_image_1,
+  mask = seg_mask_list_2,
+  object = chemo_posT_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_posT_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_posT_pcr_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_posT_pcr_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_posT_pcr_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+
+
+dev.off()
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+##### Baseline RD
+
+```{r}
+chemo_bas_rd <- chemo[, colData(chemo)$BiopsyPhase %in% c("Baseline") & colData(chemo)$pCR == "RD"]
+chemo_bas_rd
+```
+
+```{r}
+
+ unique(chemo_bas_rd$ImageID)
+```
+
+```{r}
+baseline_image_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg1629FullStack.tiff")
+
+channelNames(baseline_image_2) <- markers
+
+baseline_mask_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg1629CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(baseline_image_2, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(baseline_image_2, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(baseline_image_2, selected_markers,
+                                  filename = "Baseline_rd.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_bas_rd)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(baseline_image_2) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- baseline_mask_2[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_bas_rd)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = baseline_image_2,
+  mask = seg_mask_list,
+  object = chemo_bas_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_bas_rd)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+
+
+png(
+  filename = "Baseline_rd_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = baseline_image_2,
+  mask = seg_mask_list,
+  object = chemo_bas_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_bas_rd)$Colour),
+  thick = TRUE
+)
+
+dev.off()
+```
+
+```{r}
+
+```
+
+```{r}
+```
+
+#### New One Baseline RD
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg1629"
+
+# Load and prepare image
+Baseline_image_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg1629FullStack.tiff")
+channelNames(Baseline_image_2) <- rownames(chemo_bas_rd)
+mcols(Baseline_image_2) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+Baseline_mask_2<- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg1629CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(Baseline_image_2[[1]]), "\n")
+cat("Mask dimensions:", dim(Baseline_mask_2[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_3 <- imageData(Baseline_mask_2[[1]])
+mask_array_int_3 <- array(as.integer(mask_array_3), dim = dim(mask_array_3))
+
+# Create new Image object with integer data
+mask_matrix_3 <- Image(mask_array_int_3, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_3 <- CytoImageList(mask_matrix_3)
+mcols(seg_mask_list_3) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(Baseline_image_2[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_3[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_bas_rd_subset <- chemo_bas_rd[, colData(chemo_bas_rd)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_bas_rd_subset) <- assays(chemo_bas_rd_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_bas_rd_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(Baseline_image_2)) {
+    ch_idx <- which(channelNames(Baseline_image_2) == marker)
+    ch_values <- Baseline_image_2[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      Baseline_image_2[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = Baseline_image_2,
+  mask = seg_mask_list_3,
+  object = chemo_bas_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_bas_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_bas_rd_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_bas_rd_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_bas_rd_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "Baseline_rd_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Baseline_image_2,
+  mask = seg_mask_list_3,
+  object = chemo_bas_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_bas_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_bas_rd_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_bas_rd_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_bas_rd_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+
+
+
+dev.off()
+
+
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+##### On-treatment RD
+
+```{r}
+chemo_onT_rd <- chemo[, colData(chemo)$BiopsyPhase %in% c("On-treatment") & colData(chemo)$pCR == "RD"]
+chemo_onT_rd
+```
+
+```{r}
+
+ unique(chemo_onT_rd$ImageID)
+```
+
+```{r}
+Ontreatment_image_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0797FullStack.tiff")
+
+channelNames(Ontreatment_image_2) <- markers
+
+Ontreatment_mask_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0797CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(Ontreatment_image_2, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(Ontreatment_image_2, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+  
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(Ontreatment_image_2, selected_markers,
+                                  filename = "Ontreatment_rd.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_onT_rd)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(Ontreatment_image_2) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- Ontreatment_mask_2[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_onT_rd)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = Ontreatment_image_2,
+  mask = seg_mask_list,
+  object = chemo_onT_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_onT_rd)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+
+
+png(
+  filename = "Ontreatment_rd_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Ontreatment_image_2,
+  mask = seg_mask_list,
+  object = chemo_onT_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_onT_rd)$Colour),
+  thick = TRUE
+)
+
+
+dev.off()
+```
+
+```{r}
+
+```
+
+```{r}
+```
+
+#### New One Ontreatment RD
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg1088"
+
+# Load and prepare image
+Ontreatment_image_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg1088FullStack.tiff")
+channelNames(Ontreatment_image_2) <- rownames(chemo_onT_rd)
+mcols(Ontreatment_image_2) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+Ontreatment_mask_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg1088CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(Ontreatment_image_2[[1]]), "\n")
+cat("Mask dimensions:", dim(Ontreatment_mask_2[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_4 <- imageData(Ontreatment_mask_2[[1]])
+mask_array_int_4 <- array(as.integer(mask_array_4), dim = dim(mask_array_4))
+
+# Create new Image object with integer data
+mask_matrix_4 <- Image(mask_array_int_4, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_4 <- CytoImageList(mask_matrix_4)
+mcols(seg_mask_list_4) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(Ontreatment_image_2[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_4[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_onT_rd_subset <- chemo_onT_rd[, colData(chemo_onT_rd)$ImageID ==img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_onT_rd_subset) <- assays(chemo_onT_rd_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_onT_rd_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(Ontreatment_image_2)) {
+    ch_idx <- which(channelNames(Ontreatment_image_2) == marker)
+    ch_values <- Ontreatment_image_2[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      Ontreatment_image_2[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+
+plotPixels(
+  image = Ontreatment_image_2,
+  mask = seg_mask_list_4,
+  object = chemo_onT_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_onT_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_onT_rd_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_onT_rd_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_onT_rd_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "Ontreatment_rd_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Ontreatment_image_2,
+  mask = seg_mask_list_4,
+  object = chemo_onT_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_onT_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_onT_rd_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_onT_rd_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_onT_rd_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+
+dev.off()
+
+
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+##### Post-treatment RD
+
+```{r}
+chemo_posT_rd <- chemo[, colData(chemo)$BiopsyPhase %in% c("Post-treatment") & colData(chemo)$pCR == "RD"]
+chemo_posT_rd
+```
+
+```{r}
+
+ unique(chemo_posT_rd$ImageID)
+```
+
+```{r}
+Posttreatment_image_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0311FullStack.tiff")
+
+channelNames(Posttreatment_image_2) <- markers
+
+Posttreatment_mask_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0311CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(Posttreatment_image_2, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(Posttreatment_image_2, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+  
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(Posttreatment_image_2, selected_markers,
+                                  filename = "Post_Treatment_rd.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_posT_rd)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(Posttreatment_image_2) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- Posttreatment_mask_2[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_posT_rd)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = Posttreatment_image_2,
+  mask = seg_mask_list,
+  object = chemo_posT_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_posT_rd)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+
+
+
+png(
+  filename = "Posttreatment_rd_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Posttreatment_image_2,
+  mask = seg_mask_list,
+  object = chemo_posT_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend =NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_posT_rd)$Colour),
+  thick = TRUE
+)
+
+dev.off()
+```
+
+```{r}
+```
+
+```{r}
+```
+
+#### New One PostTreatment RD
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg0311"
+
+# Load and prepare image
+Posttreatment_image_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0311FullStack.tiff")
+channelNames(Posttreatment_image_2) <- rownames(chemo_posT_rd)
+mcols(Posttreatment_image_2) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+Posttreatment_mask_2 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0311CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(Posttreatment_image_2[[1]]), "\n")
+cat("Mask dimensions:", dim(Posttreatment_mask_2[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_5 <- imageData(Posttreatment_mask_2[[1]])
+mask_array_int_5 <- array(as.integer(mask_array_5), dim = dim(mask_array_5))
+
+# Create new Image object with integer data
+mask_matrix_5 <- Image(mask_array_int_5, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_5 <- CytoImageList(mask_matrix_5)
+mcols(seg_mask_list_5) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(Posttreatment_image_2[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_5[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_posT_rd_subset <- chemo_posT_rd[, colData(chemo_posT_rd)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_posT_rd_subset) <- assays(chemo_posT_rd_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_posT_rd_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(Posttreatment_image_2)) {
+    ch_idx <- which(channelNames(Posttreatment_image_2) == marker)
+    ch_values <- Posttreatment_image_2[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      Posttreatment_image_2[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = Posttreatment_image_2,
+  mask = seg_mask_list_5,
+  object = chemo_posT_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_posT_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_posT_rd_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_posT_rd_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_posT_rd_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "Posttreatment_rd_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Posttreatment_image_2,
+  mask = seg_mask_list_5,
+  object = chemo_posT_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_posT_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_posT_rd_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_posT_rd_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_posT_rd_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+dev.off()
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+#### Chemotherapy & Immunotherapy
+
+##### Baseline PCR
+
+```{r}
+
+
+```
+
+```{r}
+chemo_immu_bas_pcr <- chemo_immu[, colData(chemo_immu)$BiopsyPhase %in% c("Baseline") & colData(chemo_immu)$pCR == "pCR"]
+chemo_immu_bas_pcr
+```
+
+```{r}
+
+ unique(chemo_immu_bas_pcr$ImageID)
+```
+
+```{r}
+baseline_image_11 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0605FullStack.tiff")
+
+channelNames(baseline_image_11) <- markers
+
+baseline_mask_11 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0605CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(baseline_image_11, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(baseline_image_11, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+  
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(baseline_image_11, selected_markers,
+                                  filename = "chemo_immu_Baseline_pcr.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_immu_bas_pcr)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(baseline_image_11) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- baseline_mask_11[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_immu_bas_pcr)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = baseline_image_11,
+  mask = seg_mask_list,
+  object = chemo_immu_bas_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_bas_pcr)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+
+
+png(
+  filename = "chemo_immu_Baseline_pcr_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = baseline_image_11,
+  mask = seg_mask_list,
+  object = chemo_immu_bas_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_bas_pcr)$Colour),
+  thick = TRUE
+)
+
+
+dev.off()
+```
+
+```{r}
+
+```
+
+#### New One Baseline_Chemo_immuno
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg0605"
+
+# Load and prepare image
+baseline_image_11 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0605FullStack.tiff")
+channelNames(baseline_image_11) <- rownames(chemo_immu_bas_pcr)
+mcols(baseline_image_11) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+baseline_mask_11 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0605CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(baseline_image_11[[1]]), "\n")
+cat("Mask dimensions:", dim(baseline_mask_11[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_6 <- imageData(baseline_mask_11[[1]])
+mask_array_int_6 <- array(as.integer(mask_array_6), dim = dim(mask_array_6))
+
+# Create new Image object with integer data
+mask_matrix_6 <- Image(mask_array_int_6, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_6 <- CytoImageList(mask_matrix_6)
+mcols(seg_mask_list_6) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(baseline_image_11[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_6[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_immu_bas_pcr_subset <- chemo_immu_bas_pcr[, colData(chemo_immu_bas_pcr)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_immu_bas_pcr_subset) <- assays(chemo_immu_bas_pcr_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_immu_bas_pcr_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(baseline_image_11)) {
+    ch_idx <- which(channelNames(baseline_image_11) == marker)
+    ch_values <- baseline_image_11[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      baseline_image_11[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = baseline_image_11,
+  mask = seg_mask_list_6,
+  object = chemo_immu_bas_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_immu_bas_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_bas_pcr_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_immu_bas_pcr_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_immu_bas_pcr_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "chemo_immu_Baseline_pcr_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = baseline_image_11,
+  mask = seg_mask_list_6,
+  object = chemo_immu_bas_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_immu_bas_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_bas_pcr_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_immu_bas_pcr_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_immu_bas_pcr_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+
+dev.off()
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+##### On-treatment PCR
+
+```{r}
+chemo_immu_onT_pcr <- chemo_immu[, colData(chemo_immu)$BiopsyPhase %in% c("On-treatment") & colData(chemo_immu)$pCR == "pCR"]
+chemo_immu_onT_pcr
+```
+
+```{r}
+
+ unique(chemo_immu_onT_pcr$ImageID)
+```
+
+```{r}
+Ontreatment_image_12 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0985FullStack.tiff")
+
+channelNames(Ontreatment_image_12) <- markers
+
+Ontreatment_mask_12 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0985CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(Ontreatment_image_12, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(Ontreatment_image_12, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(Ontreatment_image_12, selected_markers,
+                                  filename = "chemo_immu_Ontreatment_pcr.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_immu_onT_pcr)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(Ontreatment_image_12) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- Ontreatment_mask_12[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_immu_onT_pcr)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = Ontreatment_image_12,
+  mask = seg_mask_list,
+  object = chemo_immu_onT_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_onT_pcr)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+
+
+
+png(
+  filename = "chemo_immu_Ontreattment_pcr_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Ontreatment_image_12,
+  mask = seg_mask_list,
+  object = chemo_immu_onT_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_onT_pcr)$Colour),
+  thick = TRUE
+)
+
+dev.off()
+```
+
+```{r}
+
+```
+
+```{r}
+```
+
+#### New One On Treatment
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg0985"
+
+# Load and prepare image
+Ontreatment_image_11 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0985FullStack.tiff")
+channelNames(Ontreatment_image_11) <- rownames(chemo_immu_onT_pcr)
+mcols(Ontreatment_image_11) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+Ontreatment_mask_11 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0985CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(Ontreatment_image_11[[1]]), "\n")
+cat("Mask dimensions:", dim(Ontreatment_mask_11[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_7 <- imageData(Ontreatment_mask_11[[1]])
+mask_array_int_7 <- array(as.integer(mask_array_7), dim = dim(mask_array_7))
+
+# Create new Image object with integer data
+mask_matrix_7 <- Image(mask_array_int_7, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_7 <- CytoImageList(mask_matrix_7)
+mcols(seg_mask_list_7) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(Ontreatment_image_11[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_7[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_immu_onT_pcr_subset <- chemo_immu_onT_pcr[, colData(chemo_immu_onT_pcr)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_immu_onT_pcr_subset) <- assays(chemo_immu_onT_pcr_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_immu_onT_pcr_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(Ontreatment_image_11)) {
+    ch_idx <- which(channelNames(Ontreatment_image_11) == marker)
+    ch_values <- Ontreatment_image_11[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      Ontreatment_image_11[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = Ontreatment_image_11,
+  mask = seg_mask_list_7,
+  object = chemo_immu_onT_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_immu_onT_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_onT_pcr_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_immu_onT_pcr_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_immu_onT_pcr_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "chemo_immu_Ontreatment_pcr_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Ontreatment_image_11,
+  mask = seg_mask_list_7,
+  object = chemo_immu_onT_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_immu_onT_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_onT_pcr_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_immu_onT_pcr_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_immu_onT_pcr_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+
+
+
+dev.off()
+
+
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+##### Post-treatment PCR
+
+```{r}
+chemo_immu_posT_pcr <- chemo_immu[, colData(chemo_immu)$BiopsyPhase %in% c("Post-treatment") & colData(chemo_immu)$pCR == "pCR"]
+chemo_immu_posT_pcr
+```
+
+```{r}
+
+ unique(chemo_immu_posT_pcr$ImageID)
+```
+
+```{r}
+Posttreatment_image_13 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0552FullStack.tiff")
+
+channelNames(Posttreatment_image_13) <- markers
+
+Posttreatment_mask_13 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0552CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(Posttreatment_image_13, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(Posttreatment_image_13, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+ 
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(Posttreatment_image_13, selected_markers,
+                                  filename = "chemo_immu_Post_Treatment_pcr.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_immu_posT_pcr)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(Posttreatment_image_13) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- Posttreatment_mask_13[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_immu_posT_pcr)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = Posttreatment_image_13,
+  mask = seg_mask_list,
+  object = chemo_immu_posT_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_posT_pcr)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+
+png(
+  filename = "chemo_immu_Posttreattment_pcr_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+plotPixels(
+  image = Posttreatment_image_13,
+  mask = seg_mask_list,
+  object = chemo_immu_posT_pcr, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_posT_pcr)$Colour),
+  thick = TRUE
+)
+
+
+
+
+dev.off()
+```
+
+```{r}
+
+```
+
+#### New One PostTreatment
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg0159"
+
+# Load and prepare image
+Posttreatment_image_11 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0159FullStack.tiff")
+channelNames(Posttreatment_image_11) <- rownames(chemo_immu_posT_pcr)
+mcols(Posttreatment_image_11) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+Posttreatment_mask_11 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0159CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(Posttreatment_image_11[[1]]), "\n")
+cat("Mask dimensions:", dim(Posttreatment_mask_11[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_8 <- imageData(Posttreatment_mask_11[[1]])
+mask_array_int_8 <- array(as.integer(mask_array_8), dim = dim(mask_array_8))
+
+# Create new Image object with integer data
+mask_matrix_8 <- Image(mask_array_int_8, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_8 <- CytoImageList(mask_matrix_8)
+mcols(seg_mask_list_8) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(Posttreatment_image_11[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_8[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_immu_posT_pcr_subset <- chemo_immu_posT_pcr[, colData(chemo_immu_posT_pcr)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_immu_posT_pcr_subset) <- assays(chemo_immu_posT_pcr_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_immu_posT_pcr_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(Posttreatment_image_11)) {
+    ch_idx <- which(channelNames(Posttreatment_image_11) == marker)
+    ch_values <- Posttreatment_image_11[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      Posttreatment_image_11[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = Posttreatment_image_11,
+  mask = seg_mask_list_8,
+  object = chemo_immu_posT_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_posT_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_posT_pcr_subset, "transformed_counts")["AR",], 0.98), 50),
+    CD8 = c(0, quantile(assay(chemo_immu_posT_pcr_subset, "transformed_counts")["CD8",], 0.98), 50),
+    CD11c = c(0, quantile(assay(chemo_immu_posT_pcr_subset, "transformed_counts")["CD11c",], 0.98), 50)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  #outline_by = NULL, 
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "chemo_immu_Posttreatment_pcr_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Posttreatment_image_11,
+  mask = seg_mask_list_8,
+  object = chemo_immu_posT_pcr_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_posT_pcr)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_posT_pcr_subset, "transformed_counts")["AR",], 0.98), 50),
+    CD8 = c(0, quantile(assay(chemo_immu_posT_pcr_subset, "transformed_counts")["CD8",], 0.98), 50),
+    CD11c = c(0, quantile(assay(chemo_immu_posT_pcr_subset, "transformed_counts")["CD11c",], 0.98), 50)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  #outline_by = NULL, 
+  image_title = NULL
+)
+
+
+
+
+dev.off()
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+##### Baseline RD
+
+```{r}
+chemo_immu_bas_rd <- chemo_immu[, colData(chemo_immu)$BiopsyPhase %in% c("Baseline") & colData(chemo_immu)$pCR == "RD"]
+chemo_immu_bas_rd
+```
+
+```{r}
+
+ unique(chemo_immu_bas_rd$ImageID)
+```
+
+```{r}
+baseline_image_21 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg1357FullStack.tiff")
+
+channelNames(baseline_image_21) <- markers
+
+baseline_mask_21 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg1357CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(baseline_image_21, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(baseline_image_21, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+  
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(baseline_image_21, selected_markers,
+                                  filename = "chemo_immu_Baseline_rd.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_immu_bas_rd)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(baseline_image_21) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- baseline_mask_21[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_immu_bas_rd)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = baseline_image_21,
+  mask = seg_mask_list,
+  object = chemo_immu_bas_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_bas_rd)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+ 
+
+png(
+  filename = "chemo_immu_Baseline_rd_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = baseline_image_21,
+  mask = seg_mask_list,
+  object = chemo_immu_bas_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_bas_rd)$Colour),
+  thick = TRUE
+)
+
+
+dev.off()
+```
+
+```{r}
+
+```
+
+```{r}
+```
+
+#### New One Chemo_immu Baseline RD
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg1357"
+
+# Load and prepare image
+baseline_image_12 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg1357FullStack.tiff")
+channelNames(baseline_image_12) <- rownames(chemo_immu_bas_rd)
+mcols(baseline_image_12) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+baseline_mask_12 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg1357CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(baseline_image_12[[1]]), "\n")
+cat("Mask dimensions:", dim(baseline_mask_12[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_9 <- imageData(baseline_mask_12[[1]])
+mask_array_int_9 <- array(as.integer(mask_array_9), dim = dim(mask_array_9))
+
+# Create new Image object with integer data
+mask_matrix_9 <- Image(mask_array_int_9, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_9 <- CytoImageList(mask_matrix_9)
+mcols(seg_mask_list_9) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(baseline_image_12[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_9[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_immu_bas_rd_subset <- chemo_immu_bas_rd[, colData(chemo_immu_bas_rd)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_immu_bas_rd_subset) <- assays(chemo_immu_bas_rd_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_immu_bas_rd_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(baseline_image_12)) {
+    ch_idx <- which(channelNames(baseline_image_12) == marker)
+    ch_values <- baseline_image_12[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      baseline_image_12[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = baseline_image_12,
+  mask = seg_mask_list_9,
+  object = chemo_immu_bas_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_immu_bas_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_bas_rd_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_immu_bas_rd_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_immu_bas_rd_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "chemo_immu_Baseline_rd_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = baseline_image_12,
+  mask = seg_mask_list_9,
+  object = chemo_immu_bas_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_immu_bas_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_bas_rd_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_immu_bas_rd_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_immu_bas_rd_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+dev.off()
+
+
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+##### On-treatment RD
+
+```{r}
+chemo_immu_onT_rd <- chemo_immu[, colData(chemo_immu)$BiopsyPhase %in% c("On-treatment") & colData(chemo_immu)$pCR == "RD"]
+chemo_immu_onT_rd
+```
+
+```{r}
+
+ unique(chemo_immu_onT_rd$ImageID)
+```
+
+```{r}
+Ontreatment_image_22 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0759FullStack.tiff")
+
+channelNames(Ontreatment_image_22) <- markers
+
+Ontreatment_mask_22 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0759CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(Ontreatment_image_22, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(Ontreatment_image_22, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+  
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(Ontreatment_image_22, selected_markers,
+                                  filename = "chemo_immu_Ontreatment_rd.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_immu_onT_rd)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(Ontreatment_image_22) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- Ontreatment_mask_22[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_immu_onT_rd)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = Ontreatment_image_22,
+  mask = seg_mask_list,
+  object = chemo_immu_onT_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_onT_rd)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+
+
+
+png(
+  filename = "chemo_immu_Ontreatment_rd_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Ontreatment_image_22,
+  mask = seg_mask_list,
+  object = chemo_immu_onT_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_onT_rd)$Colour),
+  thick = TRUE
+)
+
+dev.off()
+```
+
+```{r}
+```
+
+```{r}
+```
+
+#### New One On Treatment RD Chemo_immu
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg0759"
+
+# Load and prepare image
+Ontreatment_image_12 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0759FullStack.tiff")
+channelNames(Ontreatment_image_12) <- rownames(chemo_immu_onT_rd)
+mcols(Ontreatment_image_12) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+Ontreatment_mask_12 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0759CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(Ontreatment_image_12[[1]]), "\n")
+cat("Mask dimensions:", dim(Ontreatment_mask_12[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_10 <- imageData(Ontreatment_mask_12[[1]])
+mask_array_int_10 <- array(as.integer(mask_array_10), dim = dim(mask_array_10))
+
+# Create new Image object with integer data
+mask_matrix_10 <- Image(mask_array_int_10, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_10 <- CytoImageList(mask_matrix_10)
+mcols(seg_mask_list_10) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(Ontreatment_image_11[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_10[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_immu_onT_rd_subset <- chemo_immu_onT_rd[, colData(chemo_immu_onT_rd)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_immu_onT_rd_subset) <- assays(chemo_immu_onT_rd_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_immu_onT_rd_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(Ontreatment_image_12)) {
+    ch_idx <- which(channelNames(Ontreatment_image_12) == marker)
+    ch_values <- Ontreatment_image_12[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      Ontreatment_image_12[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = Ontreatment_image_12,
+  mask = seg_mask_list_10,
+  object = chemo_immu_onT_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_immu_onT_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_onT_rd_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_immu_onT_rd_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_immu_onT_rd_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "chemo_immu_Ontreatment_rd_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Ontreatment_image_12,
+  mask = seg_mask_list_10,
+  object = chemo_immu_onT_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_immu_onT_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_onT_rd_subset, "transformed_counts")["AR",], 0.98), 30),
+    CD8 = c(0, quantile(assay(chemo_immu_onT_rd_subset, "transformed_counts")["CD8",], 0.98), 30),
+    CD11c = c(0, quantile(assay(chemo_immu_onT_rd_subset, "transformed_counts")["CD11c",], 0.98), 30)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  image_title = NULL
+)
+
+
+
+dev.off()
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+##### Post-treatment RD
+
+```{r}
+chemo_immu_posT_rd <- chemo_immu[, colData(chemo_immu)$BiopsyPhase %in% c("Post-treatment") & colData(chemo_immu)$pCR == "RD"]
+chemo_immu_posT_rd
+```
+
+```{r}
+
+ unique(chemo_immu_posT_rd$ImageID)
+```
+
+```{r}
+Posttreatment_image_23 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0553FullStack.tiff")
+
+channelNames(Posttreatment_image_23) <- markers
+
+Posttreatment_mask_23 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0553CellMask.tiff")
+```
+
+```{r}
+
+plot_channel <- function(img_list, channel_name, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check channel exists
+  if(!channel_name %in% channelNames(img_list)) {
+    stop(paste("Channel", channel_name, "not found in image."))
+  }
+  
+  # Get channel index
+  ch_idx <- which(channelNames(img_list) == channel_name)
+  
+  # Extract pixel values
+  pixel_values <- img_list[[1]][,,ch_idx]
+  
+  # Check if all zeros or near zero
+  if(auto_scale) {
+    # scale if values are very small
+    if(max(abs(pixel_values), na.rm = TRUE) < 1) {
+      img_list[[1]][,,ch_idx] <- pixel_values * scale_factor
+      pixel_values <- img_list[[1]][,,ch_idx]
+      message(paste("Pixel values scaled by", scale_factor, "for visibility."))
+    }
+  }
+  
+  # Set bcg to actual min/max
+  bcg_val <- c(min(pixel_values, na.rm = TRUE), max(pixel_values, na.rm = TRUE), 1)
+  
+  # Plot
+  plotPixels(img_list, 
+             colour_by = channel_name,
+             bcg = setNames(list(bcg_val), channel_name))
+}
+
+```
+
+```{r}
+
+plot_channel(Posttreatment_image_23, "AR")
+```
+
+```{r}
+
+plot_selected_markers_overlay <- function(img_list, markers, scale_factor = 1e4, auto_scale = TRUE) {
+  
+  # Check markers exist
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all selected markers on the same image without image ID
+  plotPixels(img_list, 
+             colour_by = markers,
+             image_title = NULL)  # Remove image ID title
+  
+  message("Done plotting selected markers overlayed on a single image.")
+}
+```
+
+```{r}
+
+
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+plot_selected_markers_overlay(Posttreatment_image_23, selected_markers)
+```
+
+```{r}
+
+
+save_selected_markers_overlay_png <- function(img_list, markers, filename,
+                                              width = 10, height = 10, res = 650,
+                                              scale_factor = 1e4, auto_scale = TRUE,
+                                              label_alpha = 0.7) {
+  
+  # Open high-resolution PNG device
+  png(filename, width = width, height = height, units = "in", res = res)
+  
+  # Keep only valid markers
+  markers <- markers[markers %in% channelNames(img_list)]
+  if(length(markers) == 0) stop("No valid markers found.")
+  
+  # Assign distinct colors to each marker
+  marker_colors <- brewer.pal(n = length(markers), name = "Set1")
+  names(marker_colors) <- markers
+  
+  # Scale small values if needed
+  for(marker in markers){
+    ch_idx <- which(channelNames(img_list) == marker)
+    ch_values <- img_list[[1]][,,ch_idx]
+    
+    if(auto_scale && max(ch_values, na.rm = TRUE) < 1){
+      img_list[[1]][,,ch_idx] <- ch_values * scale_factor
+      message(paste("Scaled marker:", marker, "by", scale_factor))
+    }
+  }
+  
+  # Plot all markers overlayed without default legend
+  plotPixels(img_list,
+             colour_by = markers,
+             legend = NULL,
+             image_title = NULL)
+  
+ 
+  
+  # Close the PNG device
+  dev.off()
+  
+  message(paste("Saved high-resolution overlay PNG to:", filename))
+}
+
+# Example usage
+selected_markers <- c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin")
+save_selected_markers_overlay_png(Posttreatment_image_23, selected_markers,
+                                  filename = "chemo_immu_Post_Treatment_rd.png",
+                                  width = 6, height = 6, res = 800)
+
+
+
+
+
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(cytomapper)
+library(EBImage)
+library(S4Vectors)
+
+# ------------------------------
+# 1. Align ImageID with object table
+# ------------------------------
+# Use the first unique ImageID from the object table
+img_id_value <- unique(colData(chemo_immu_posT_rd)$ImageID)[1]  # e.g., "NTImg0588"
+
+# Assign ImageID to the image
+mcols(Posttreatment_image_23) <- DataFrame(ImageID = img_id_value)
+
+# ------------------------------
+# 2. Extract the grayscale mask from CytoImageList
+# ------------------------------
+mask_matrix <- Posttreatment_mask_23[[1]]  # extract first mask
+
+# Convert to numeric matrix
+mask_mat <- as.matrix(mask_matrix)
+
+# ------------------------------
+# 3. Threshold and label objects
+# ------------------------------
+threshold_value <- 0.0000001  # adjust based on intensity
+
+# Create binary mask
+binary_mask <- ifelse(mask_mat > threshold_value, 1, 0)
+
+# Label connected objects (unique integers per object)
+seg_mask <- bwlabel(binary_mask)  # EBImage function
+
+# Convert to EBImage Image
+seg_image <- Image(seg_mask, colormode = "Grayscale")
+
+# Wrap into a CytoImageList
+seg_mask_list <- CytoImageList(seg_image)
+
+# Assign the same ImageID to the mask
+mcols(seg_mask_list) <- DataFrame(ImageID = img_id_value)
+
+
+metadata(chemo_immu_posT_rd)$Colour <- cell_type_colors
+
+# ------------------------------
+# 4. Plot pixels
+# ------------------------------
+plotPixels(
+  image = Posttreatment_image_23,
+  mask = seg_mask_list,
+  object = chemo_immu_posT_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_posT_rd)$Colour),
+  thick = TRUE
+)
+
+```
+
+```{r}
+
+
+
+
+png(
+  filename = "chemo_immu_Posttreatment_rd_cell.png",
+  width = 6,       # inches
+  height = 6,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Posttreatment_image_23,
+  mask = seg_mask_list,
+  object = chemo_immu_posT_rd, 
+  cell_id = "ObjectNumber", 
+  img_id = "ImageID",
+  image_title = NULL,
+  legend = NULL,
+  colour_by = c("AR", "CD8", "FOXP3", "CD163", "CD11c", "Carboplatin"),
+  outline_by = "ParentCelltypes",
+  colour = list(ParentCelltypes = metadata(chemo_immu_posT_rd)$Colour),
+  thick = TRUE
+)
+
+dev.off()
+```
+
+```{r}
+
+```
+
+```{r}
+```
+
+#### New One PostTreatment Chemo_Immu RD
+
+```{r}
+
+# ------------------------------
+# 1. Prepare Image and Mask
+# ------------------------------
+img_id_value <- "NTImg0553"
+
+# Load and prepare image
+Posttreatment_image_12 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0553FullStack.tiff")
+channelNames(Posttreatment_image_12) <- rownames(chemo_immu_posT_rd)
+mcols(Posttreatment_image_12) <- DataFrame(ImageID = img_id_value)
+
+# Load mask
+Posttreatment_mask_12 <- loadImages("V:/dkmarri/Breast_Cancer_IMC_Data/New_data/images/NTImg0553CellMask.tiff")
+
+# Check dimensions
+cat("Image dimensions:", dim(Posttreatment_image_12[[1]]), "\n")
+cat("Mask dimensions:", dim(Posttreatment_mask_12[[1]]), "\n")
+
+# Convert mask to integer while preserving dimensions
+mask_array_11 <- imageData(Posttreatment_mask_12[[1]])
+mask_array_int_11 <- array(as.integer(mask_array_11), dim = dim(mask_array_11))
+
+# Create new Image object with integer data
+mask_matrix_11 <- Image(mask_array_int_11, colormode = "Grayscale")
+
+# Create segmentation mask list
+seg_mask_list_11 <- CytoImageList(mask_matrix_11)
+mcols(seg_mask_list_11) <- DataFrame(ImageID = img_id_value)
+
+# Verify dimensions match now
+cat("Final image dimensions:", dim(Posttreatment_image_12[[1]])[1:2], "\n")
+cat("Final mask dimensions:", dim(seg_mask_list_11[[1]]), "\n")
+
+
+```
+
+```{r}
+# ------------------------------
+# 2. Subset object to match image
+# ------------------------------
+chemo_immu_posT_rd_subset <- chemo_immu_posT_rd[, colData(chemo_immu_posT_rd)$ImageID == img_id_value]
+
+# Set transformed_counts as the default assay
+assays(chemo_immu_posT_rd_subset) <- assays(chemo_immu_posT_rd_subset)[c("transformed_counts", 
+                                                                 setdiff(assayNames(chemo_immu_posT_rd_subset), 
+                                                                         "transformed_counts"))]
+
+```
+
+```{r}
+
+# ------------------------------
+# 3. Define bright publication-quality colors
+# ------------------------------
+bright_marker_colors <- c(
+  "AR"          = "#FF1A1A",  # Intense red
+  "CD8"         = "#00FF00",  # Neon green
+  "CD11c"       = "#FF00FF"  # Hot magenta
+  
+)
+
+selected_markers <- c("AR", "CD8", "CD11c")
+```
+
+```{r}
+# ------------------------------
+# 4. Scale markers for visibility
+# ------------------------------
+for(marker in selected_markers) {
+  if(marker %in% channelNames(Posttreatment_image_12)) {
+    ch_idx <- which(channelNames(Posttreatment_image_12) == marker)
+    ch_values <- Posttreatment_image_12[[1]][,,ch_idx]
+    
+    # Scale if values are very small
+    if(max(ch_values, na.rm = TRUE) < 2) {
+      Posttreatment_image_12[[1]][,,ch_idx] <- ch_values * 1e6
+      message(paste("Scaled marker:", marker, "by 1000000"))
+    }
+  }
+}
+```
+
+```{r}
+
+plotPixels(
+  image = Posttreatment_image_12,
+  mask = seg_mask_list_11,
+  object = chemo_immu_posT_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_immu_posT_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_posT_rd_subset, "transformed_counts")["AR",], 0.98), 50),
+    CD8 = c(0, quantile(assay(chemo_immu_posT_rd_subset, "transformed_counts")["CD8",], 0.98), 50),
+    CD11c = c(0, quantile(assay(chemo_immu_posT_rd_subset, "transformed_counts")["CD11c",], 0.98), 50)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  #outline_by = NULL, 
+  image_title = NULL
+)
+
+```
+
+```{r}
+png(
+  filename = "chemo_immu_Posttreatment_rd_cell_New.png",
+  width = 2,       # inches
+  height = 2,      # inches
+  units = "in",
+  res = 900,        # high resolution
+  bg = "white"
+)
+
+plotPixels(
+  image = Posttreatment_image_12,
+  mask = seg_mask_list_11,
+  object = chemo_immu_posT_rd_subset,
+  cell_id = "ObjectNumber",
+  img_id = "ImageID",
+  colour_by = selected_markers,
+  outline_by = "ParentCelltypes",
+  colour = list(
+    channels = bright_marker_colors,
+    ParentCelltypes = metadata(chemo_immu_posT_rd)$Colour
+  ),
+  bcg = list(
+    AR = c(0, quantile(assay(chemo_immu_posT_rd_subset, "transformed_counts")["AR",], 0.98), 50),
+    CD8 = c(0, quantile(assay(chemo_immu_posT_rd_subset, "transformed_counts")["CD8",], 0.98), 50),
+    CD11c = c(0, quantile(assay(chemo_immu_posT_rd_subset, "transformed_counts")["CD11c",], 0.98), 50)
+  ),
+  thick = TRUE,
+  missing_colour = "white",
+  legend = NULL,
+  #outline_by = NULL, 
+  image_title = NULL
+)
+
+
+
+dev.off()
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+```
+
+```{r}
+
+```
+
+#### Distribution
+
+##### Combined data
+
+```{r}
+
+
+#Create a data frame from the ParentCell vector
+parent_cells_1 <- data.frame(ParentCell = Combined_data$ParentCelltypes)
+
+initial_counts <- parent_cells_1 %>%
+  count(ParentCell) %>%
+  mutate(original_percentage = (n / sum(n) * 100))
+
+
+cell_counts <- initial_counts %>%
+  mutate(
+    percentage = case_when(
+      ParentCell == "Other" ~ pmax(0, original_percentage - 10), 
+      TRUE ~ original_percentage
+    )
+  ) %>%
+ 
+  mutate(percentage = (percentage / sum(percentage) * 100)) %>%
+  # Arrange in descending order of modified percentage
+  arrange(desc(percentage))
+
+
+#print("Cell type distribution with modified 'Other' percentage:")
+#print(select(cell_counts, ParentCell, n, percentage))
+```
+
+```{r}
+
+# Define enhanced text theme elements with increased size and bold font
+bold_text_theme <- theme(
+  # Axis text (ticks)
+  axis.text.x = element_text(size = 12, face = "bold", color = "black", angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 12, color = "black", face = "bold"),
+  # Axis titles (labels)
+  axis.title.x = element_text(size = 14, face = "bold", margin = margin(t = 20, r = 0, b = 0, l = 0)),
+  axis.title.y = element_text(size = 14, face = "bold", margin = margin(t = 0, r = 20, b = 0, l = 0)),
+  # Legend text
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text = element_text(size = 12, face = "bold"),
+  # Plot title and subtitle
+  plot.title = element_text(size = 14, face = "bold"),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+  # Other elements
+  legend.position = "right",
+  panel.grid.major = element_line(color = "gray90"),
+  panel.grid.minor = element_line(color = "gray95")
+)
+
+# Create bar plot with enhanced text formatting and consistent color scheme
+bar_plot <- ggplot(cell_counts, aes(x = reorder(ParentCell, -percentage), y = percentage, fill = ParentCell)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_fill_manual(values = cell_type_colors) +  # Apply the defined color scheme
+  theme_minimal() +
+  bold_text_theme +
+  labs(
+    title = "Distribution of Combined Data Parent Cell Types",
+    x = "Parent Cell Type",
+    y = "Percentage (%)",
+    fill = "Cell Type"
+  ) +
+  # Place text labels ABOVE the bars instead of inside them
+  geom_text(aes(label = sprintf("%.1f%%", percentage)),
+            vjust = -0.5,  # Negative value places text above the bar
+            color = "black", size = 4, fontface = "bold")
+
+# Save the bar plot as a high-resolution PNG file
+ggsave(
+  filename = "Combined_data_Parent_Cell_types_Percentages.png",
+  plot = bar_plot,
+  width = 8,
+  height = 7,
+  dpi = 650,
+  bg = "white"
+)
+
+print(bar_plot)
+```
+
+```{r}
+
+```
+
+##### Chemotherapy data
+
+```{r}
+
+#Create a data frame from the ParentCell vector
+parent_cells_2 <- data.frame(ParentCell = chemo$ParentCelltypes)
+
+initial_counts <- parent_cells_2 %>%
+  count(ParentCell) %>%
+  mutate(original_percentage = (n / sum(n) * 100))
+
+
+cell_counts <- initial_counts %>%
+  mutate(
+    percentage = case_when(
+      ParentCell == "Other" ~ pmax(0, original_percentage - 10), 
+      TRUE ~ original_percentage
+    )
+  ) %>%
+ 
+  mutate(percentage = (percentage / sum(percentage) * 100)) %>%
+  # Arrange in descending order of modified percentage
+  arrange(desc(percentage))
+
+
+#print("Cell type distribution with modified 'Other' percentage:")
+#print(select(cell_counts, ParentCell, n, percentage))
+```
+
+```{r}
+
+# Define enhanced text theme elements with increased size and bold font
+bold_text_theme <- theme(
+  # Axis text (ticks)
+  axis.text.x = element_blank(),
+  axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+  # Axis titles (labels)
+  axis.title.x = element_text(size = 10, face = "bold", margin = margin(t = 20, r = 0, b = 0, l = 0)),
+  axis.title.y = element_text(size = 10, face = "bold", margin = margin(t = 0, r = 20, b = 0, l = 0)),
+  # Legend text
+  legend.title = element_text(size = 10, face = "bold"),
+  legend.text = element_text(size = 10, face = "bold"),
+  # Plot title and subtitle
+  plot.title = element_text(size = 12, face = "bold"),
+  plot.subtitle = element_text(size = 12, face = "bold"),
+  # Other elements
+  legend.position = "right",
+  panel.grid.major = element_line(color = "gray90"),
+  panel.grid.minor = element_line(color = "gray95")
+)
+
+# Create bar plot with enhanced text formatting and consistent color scheme
+bar_plot <- ggplot(cell_counts, aes(x = reorder(ParentCell, -percentage), y = percentage, fill = ParentCell)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_fill_manual(values = cell_type_colors) +  # Apply the defined color scheme
+  theme_minimal() +
+  bold_text_theme +
+  labs(
+    title = "",
+    x = "CellType ",
+    y = "Percentage (%)",
+    fill = "CellType"
+  ) +
+  # Place text labels ABOVE the bars instead of inside them
+  geom_text(aes(label = sprintf("%.1f%%", percentage)),
+            vjust = -0.5,  # Negative value places text above the bar
+            color = "black", size = 4, fontface = "bold")
+
+# Save the bar plot as a high-resolution PNG file
+ggsave(
+  filename = "Chemotherapy_Parent_Cell_types_Percentages.png",
+  plot = bar_plot,
+  width = 8,
+  height = 5,
+  dpi = 1300,
+  bg = "white"
+)
+
+print(bar_plot)
+```
+
+```{r}
+```
+
+```{r}
+
+# Define enhanced text theme
+bold_text_theme <- theme(
+  axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text = element_text(size = 12, face = "bold"),
+  plot.title = element_text(size = 14, face = "bold"),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+  legend.position = "right",
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank()
+)
+
+# Donut plot
+donut_plot <- ggplot(cell_counts, aes(x = 2, y = percentage, fill = ParentCell)) +
+  geom_col(width = 1, color = "white") +
+  scale_fill_manual(values = cell_type_colors) +
+  coord_polar(theta = "y") +
+  xlim(0.5, 2.5) +  # Creates donut hole
+  theme_minimal() +
+  bold_text_theme +
+  labs(
+    title = "",
+    fill = "Cell Type"
+  ) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)),
+            position = position_stack(vjust = 0.4),
+            color = "white",
+            size = 5,
+            fontface = "bold")
+
+# # Save donut as high resolution
+ggsave(
+  filename = "Chemotherapy_Parent_Celltypes_Distribution_DonutPlot.png",
+  plot = donut_plot,
+  width = 5,
+  height = 5,
+  dpi = 1300,
+  bg = "white"
+)
+
+print(donut_plot)
+
+```
+
+```{r}
+
+```
+
+##### Chemotherapy & Immunotherapy data
+
+```{r}
+#Create a data frame from the ParentCell vector
+parent_cells_3 <- data.frame(ParentCell = chemo_immu$ParentCelltypes)
+
+initial_counts <- parent_cells_3 %>%
+  count(ParentCell) %>%
+  mutate(original_percentage = (n / sum(n) * 100))
+
+
+cell_counts <- initial_counts %>%
+  mutate(
+    percentage = case_when(
+      ParentCell == "Other" ~ pmax(0, original_percentage - 10), 
+      TRUE ~ original_percentage
+    )
+  ) %>%
+ 
+  mutate(percentage = (percentage / sum(percentage) * 100)) %>%
+  # Arrange in descending order of modified percentage
+  arrange(desc(percentage))
+
+
+#print("Cell type distribution with modified 'Other' percentage:")
+#print(select(cell_counts, ParentCell, n, percentage))
+```
+
+```{r}
+
+# Define enhanced text theme elements with increased size and bold font
+bold_text_theme <- theme(
+  # Axis text (ticks)
+  axis.text.x = element_blank(),
+  axis.text.y = element_text(size = 12, color = "black", face = "bold"),
+  # Axis titles (labels)
+  axis.title.x = element_text(size = 14, face = "bold", margin = margin(t = 20, r = 0, b = 0, l = 0)),
+  axis.title.y = element_text(size = 14, face = "bold", margin = margin(t = 0, r = 20, b = 0, l = 0)),
+  # Legend text
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text = element_text(size = 12, face = "bold"),
+  # Plot title and subtitle
+  plot.title = element_text(size = 14, face = "bold"),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+  # Other elements
+  legend.position = "right",
+  panel.grid.major = element_line(color = "gray90"),
+  panel.grid.minor = element_line(color = "gray95")
+)
+
+# Create bar plot with enhanced text formatting and consistent color scheme
+bar_plot <- ggplot(cell_counts, aes(x = reorder(ParentCell, -percentage), y = percentage, fill = ParentCell)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_fill_manual(values = cell_type_colors) +  # Apply the defined color scheme
+  theme_minimal() +
+  bold_text_theme +
+  labs(
+    title = "",
+    x = "CellType",
+    y = "Percentage (%)",
+    fill = "Cell Type"
+  ) +
+  # Place text labels ABOVE the bars instead of inside them
+  geom_text(aes(label = sprintf("%.1f%%", percentage)),
+            vjust = -0.5,  # Negative value places text above the bar
+            color = "black", size = 4, fontface = "bold")
+
+# Save the bar plot as a high-resolution PNG file
+ggsave(
+  filename = "Chemotherapy_&_Immunotherapy_Parent_Cell_types_Percentages.png",
+  plot = bar_plot,
+  width = 8,
+  height = 5,
+  dpi = 1300,
+  bg = "white"
+)
+
+print(bar_plot)
+```
+
+```{r}
+
+
+```
+
+```{r}
+
+# Define enhanced text theme
+bold_text_theme <- theme(
+  axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text = element_text(size = 12, face = "bold"),
+  plot.title = element_text(size = 14, face = "bold"),
+  plot.subtitle = element_text(size = 14, face = "bold"),
+  legend.position = "right",
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank()
+)
+
+# Donut plot
+donut_plot <- ggplot(cell_counts, aes(x = 2, y = percentage, fill = ParentCell)) +
+  geom_col(width = 1, color = "white") +
+  scale_fill_manual(values = cell_type_colors) +
+  coord_polar(theta = "y") +
+  xlim(0.5, 2.5) +  # Creates donut hole
+  theme_minimal() +
+  bold_text_theme +
+  labs(
+    title = "",
+    fill = "Cell Type"
+  ) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)),
+            position = position_stack(vjust = 0.4),
+            color = "white",
+            size = 5,
+            fontface = "bold")
+
+# Save donut as high resolution
+ggsave(
+  filename = "Chemotherapy_&_Immunotherapy_Parent_Celltypes_Distribution_DonutPlot.png",
+  plot = donut_plot,
+  width = 5,
+  height = 5,
+  dpi = 1300,
+  bg = "white"
+)
+
+print(donut_plot)
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+#### Cell distribution stratified by Biopsyphase
+
+##### For Chemotherapy
+
+```{r}
+
+# ------------------------------------------------------------
+# 0) Sanity checks
+# ------------------------------------------------------------
+stopifnot(is(chemo, "SpatialExperiment"))
+stopifnot(all(c("ParentCelltypes", "BiopsyPhase") %in% colnames(colData(chemo))))
+
+# Make sure BiopsyPhase has the order you want
+phase_order <- c("Baseline", "On-treatment", "Post-treatment")
+chemo$BiopsyPhase <- factor(as.character(chemo$BiopsyPhase), levels = phase_order)
+
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 1) Build dataframe from colData
+# ------------------------------------------------------------
+df <- as.data.frame(colData(chemo)) %>%
+  transmute(
+    BiopsyPhase = BiopsyPhase,
+    ParentCell  = as.character(ParentCelltypes)
+  ) %>%
+  filter(!is.na(BiopsyPhase), !is.na(ParentCell))
+df
+
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 2) Counts + percentages PER phase
+#    (with your "Other" -10 percentage tweak, then renormalize)
+# ------------------------------------------------------------
+cell_counts_by_phase <- df %>%
+  count(BiopsyPhase, ParentCell, name = "n") %>%
+  group_by(BiopsyPhase) %>%
+  mutate(original_percentage = n / sum(n) * 100) %>%
+  mutate(
+    percentage = case_when(
+      ParentCell == "Other" ~ pmax(0, original_percentage - 10),
+      TRUE ~ original_percentage
+    )
+  ) %>%
+  # renormalize after modification so each phase sums to 100
+  mutate(percentage = percentage / sum(percentage) * 100) %>%
+  arrange(BiopsyPhase, desc(percentage)) %>%
+  ungroup()
+
+# Optional: print table (top few per phase)
+print(
+  cell_counts_by_phase %>%
+    group_by(BiopsyPhase) %>%
+    slice_max(order_by = percentage, n = 10) %>%
+    ungroup()
+)
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 3) Colors: keep your existing cell_type_colors if present
+#    Fill missing colors safely (so plot never breaks).
+# ------------------------------------------------------------
+# Expecting you already have: cell_type_colors <- c("Epithelial"="#...", ...)
+# If not defined, create a quick one:
+if (!exists("cell_type_colors")) {
+  cell_types <- sort(unique(cell_counts_by_phase$ParentCell))
+  cell_type_colors <- setNames(hue_pal()(length(cell_types)), cell_types)
+}
+
+# Ensure every ParentCell has a color
+all_types <- sort(unique(cell_counts_by_phase$ParentCell))
+missing_cols <- setdiff(all_types, names(cell_type_colors))
+if (length(missing_cols) > 0) {
+  extra_cols <- setNames(hue_pal()(length(missing_cols)), missing_cols)
+  cell_type_colors <- c(cell_type_colors, extra_cols)
+}
+```
+
+```{r}
+
+
+# ------------------------------------------------------------
+# 4) Theme (same idea as yours)
+# ------------------------------------------------------------
+bold_text_theme <- theme(
+  axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text  = element_text(size = 12, face = "bold"),
+  plot.title   = element_text(size = 16, face = "bold"),
+  plot.subtitle= element_text(size = 13, face = "bold"),
+  legend.position = "right",
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank()
+)
+
+
+# ------------------------------------------------------------
+# 5A) One donut per phase (saved separately)
+# ------------------------------------------------------------
+plot_one_phase_donut <- function(phase_name, dat) {
+
+  dat_phase <- dat %>% filter(BiopsyPhase == phase_name)
+
+  ggplot(dat_phase, aes(x = 2, y = percentage, fill = ParentCell)) +
+    geom_col(width = 1, color = "white") +
+    scale_fill_manual(values = cell_type_colors) +
+    coord_polar(theta = "y") +
+    xlim(0.5, 2.5) +  # donut hole
+    theme_minimal() +
+    bold_text_theme +
+    labs(
+      title = paste0("Parent cell types — ", phase_name),
+      fill  = "Cell Type"
+    ) +
+    geom_text(
+      aes(label = sprintf("%.1f%%", percentage)),
+      position = position_stack(vjust = 0.5),
+      color = "white",
+      size = 4,
+      fontface = "bold"
+    )
+}
+
+phases <- levels(chemo$BiopsyPhase)
+phases <- phases[!is.na(phases)]
+
+phase_plots <- setNames(
+  lapply(phases, function(ph) plot_one_phase_donut(ph, cell_counts_by_phase)),
+  phases
+)
+
+
+iwalk(phase_plots, function(p, ph) {
+  ggsave(
+    filename = paste0("Chemotherapy_ParentCelltypes_", gsub("\\s+", "_", ph), "_DonutPlot.png"),
+    plot = p,
+    width = 5,
+    height = 5,
+    dpi = 1300,
+    bg = "white"
+  )
+})
+
+# Print any phase
+phase_plots[["Baseline"]]
+phase_plots[["On-treatment"]]
+phase_plots[["Post-treatment"]]
+```
+
+```{r}
+
+```
+
+##### For Chemotherapy & Immunotherapy
+
+```{r}
+
+# ------------------------------------------------------------
+# 0) Sanity checks
+# ------------------------------------------------------------
+stopifnot(is(chemo_immu, "SpatialExperiment"))
+stopifnot(all(c("ParentCelltypes", "BiopsyPhase") %in% colnames(colData(chemo_immu))))
+
+# Make sure BiopsyPhase has the order you want
+phase_order <- c("Baseline", "On-treatment", "Post-treatment")
+chemo_immu$BiopsyPhase <- factor(as.character(chemo_immu$BiopsyPhase), levels = phase_order)
+
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 1) Build dataframe from colData
+# ------------------------------------------------------------
+df <- as.data.frame(colData(chemo_immu)) %>%
+  transmute(
+    BiopsyPhase = BiopsyPhase,
+    ParentCell  = as.character(ParentCelltypes)
+  ) %>%
+  filter(!is.na(BiopsyPhase), !is.na(ParentCell))
+df
+
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 2) Counts + percentages PER phase
+#    (with your "Other" -10 percentage tweak, then renormalize)
+# ------------------------------------------------------------
+cell_counts_by_phase <- df %>%
+  count(BiopsyPhase, ParentCell, name = "n") %>%
+  group_by(BiopsyPhase) %>%
+  mutate(original_percentage = n / sum(n) * 100) %>%
+  mutate(
+    percentage = case_when(
+      ParentCell == "Other" ~ pmax(0, original_percentage - 10),
+      TRUE ~ original_percentage
+    )
+  ) %>%
+  # renormalize after modification so each phase sums to 100
+  mutate(percentage = percentage / sum(percentage) * 100) %>%
+  arrange(BiopsyPhase, desc(percentage)) %>%
+  ungroup()
+
+# Optional: print table (top few per phase)
+print(
+  cell_counts_by_phase %>%
+    group_by(BiopsyPhase) %>%
+    slice_max(order_by = percentage, n = 10) %>%
+    ungroup()
+)
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# 3) Colors: keep your existing cell_type_colors if present
+#    Fill missing colors safely (so plot never breaks).
+# ------------------------------------------------------------
+# Expecting you already have: cell_type_colors <- c("Epithelial"="#...", ...)
+# If not defined, create a quick one:
+if (!exists("cell_type_colors")) {
+  cell_types <- sort(unique(cell_counts_by_phase$ParentCell))
+  cell_type_colors <- setNames(hue_pal()(length(cell_types)), cell_types)
+}
+
+# Ensure every ParentCell has a color
+all_types <- sort(unique(cell_counts_by_phase$ParentCell))
+missing_cols <- setdiff(all_types, names(cell_type_colors))
+if (length(missing_cols) > 0) {
+  extra_cols <- setNames(hue_pal()(length(missing_cols)), missing_cols)
+  cell_type_colors <- c(cell_type_colors, extra_cols)
+}
+```
+
+```{r}
+
+
+# ------------------------------------------------------------
+# 4) Theme (same idea as yours)
+# ------------------------------------------------------------
+bold_text_theme <- theme(
+  axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text  = element_text(size = 12, face = "bold"),
+  plot.title   = element_text(size = 16, face = "bold"),
+  plot.subtitle= element_text(size = 13, face = "bold"),
+  legend.position = "right",
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank()
+)
+
+
+# ------------------------------------------------------------
+# 5A) One donut per phase (saved separately)
+# ------------------------------------------------------------
+plot_one_phase_donut <- function(phase_name, dat) {
+
+  dat_phase <- dat %>% filter(BiopsyPhase == phase_name)
+
+  ggplot(dat_phase, aes(x = 2, y = percentage, fill = ParentCell)) +
+    geom_col(width = 1, color = "white") +
+    scale_fill_manual(values = cell_type_colors) +
+    coord_polar(theta = "y") +
+    xlim(0.5, 2.5) +  # donut hole
+    theme_minimal() +
+    bold_text_theme +
+    labs(
+      title = paste0("Parent cell types — ", phase_name),
+      fill  = "Cell Type"
+    ) +
+    geom_text(
+      aes(label = sprintf("%.1f%%", percentage)),
+      position = position_stack(vjust = 0.5),
+      color = "white",
+      size = 4,
+      fontface = "bold"
+    )
+}
+
+phases <- levels(chemo_immu$BiopsyPhase)
+phases <- phases[!is.na(phases)]
+
+phase_plots <- setNames(
+  lapply(phases, function(ph) plot_one_phase_donut(ph, cell_counts_by_phase)),
+  phases
+)
+
+
+iwalk(phase_plots, function(p, ph) {
+  ggsave(
+    filename = paste0("chemo_immunotherapy_ParentCelltypes_", gsub("\\s+", "_", ph), "_DonutPlot.png"),
+    plot = p,
+    width = 5,
+    height = 5,
+    dpi = 1300,
+    bg = "white"
+  )
+})
+
+# Print any phase
+phase_plots[["Baseline"]]
+phase_plots[["On-treatment"]]
+phase_plots[["Post-treatment"]]
+```
+
+```{r}
+
+
+```
+
+```{r}
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
