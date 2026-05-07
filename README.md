@@ -47,3 +47,15 @@ TEMPO follows a five-stage pipeline:
 - MATLAB (R2020a or later recommended)
 - AMIGO_2 MATLAB toolbox
 - R (≥ 4.2.0 recommended)
+
+# 🔁 Reproducibility Notes
+Detailed instructions for reproducing patient-level simulations are provided within the respective cohort-specific folders:
+- /chemo_treated_simulations
+- /chemo_immunotherapy_treated_simulations
+
+### 👉 Users should refer to the README.txt files within these folders for:
+- Patient-specific simulation workflows
+- Execution of Run_[PatientID].m scripts
+- Goodness-of-fit evaluation
+- Generation and interpretation of simulation outputs
+### These folder-level instructions provide step-by-step guidance tailored to each treatment cohort, ensuring accurate reproduction of all simulation results presented in this study.
