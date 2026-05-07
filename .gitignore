@@ -1,0 +1,7 @@
+*.asv
+*.tmp
+*.log
+.Rhistory
+.RData
+*.html
+*.nb.html
